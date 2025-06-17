@@ -47,8 +47,8 @@ func LoadConfig() (*Config, error) {
 		ReadTimeout:  time.Duration(getEnvAsInt("READ_TIMEOUT", 30)) * time.Second,
 		WriteTimeout: time.Duration(getEnvAsInt("WRITE_TIMEOUT", 30)) * time.Second,
 
-		MongoURI:      getEnv("MONGO_URI", "mongodb://localhost:27017"),
-		MongoDB:       getEnv("MONGO_DB", "mailcast"),
+		MongoURI:      getEnv("MONGODB_DSN", "mongodb://localhost:27017"),
+		MongoDB:       getEnv("MONGO_DB", "daisi"),
 		MongoUser:     getEnv("MONGO_USER", ""),
 		MongoPassword: getEnv("MONGO_PASSWORD", ""),
 
@@ -59,10 +59,7 @@ func LoadConfig() (*Config, error) {
 
 		WhatsAppEndpoint: getEnv("WHATSAPP_ENDPOINT", ""),
 
-		PostgresURI:      getEnv("POSTGRES_URI", ""),
-		PostgresUser:     getEnv("POSTGRES_USER", ""),
-		PostgresPassword: getEnv("POSTGRES_PASSWORD", ""),
-		PostgresDB:       getEnv("POSTGRES_DB", ""),
+		PostgresURI: getEnv("POSTGRES_DSN", ""),
 	}
 
 	return config, nil

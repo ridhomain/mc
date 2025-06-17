@@ -39,7 +39,7 @@ func (h *FlightNotificationHandler) Process(ctx context.Context, email *entity.E
 	}
 
 	// Use the flight processor to handle the complex flight logic
-	err := h.flightProcessor.ProcessFlightMessage(ctx, body, email.ID)
+	err := h.flightProcessor.ProcessFlightMessage(ctx, body, email.EmailID)
 	if err != nil {
 		h.logger.Error("Failed to process flight message", "error", err)
 		return err

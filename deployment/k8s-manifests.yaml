@@ -1,0 +1,129 @@
+---
+# Secret for sensitive Gmail OAuth configuration only
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mailcast-gmail-service-<company_id>-secret
+  namespace: tenant-dev-doks
+type: Opaque
+stringData:
+  # Gmail OAuth credentials
+  GMAIL_CLIENT_ID: <gmail_client_id>
+  GMAIL_CLIENT_SECRET: <gmail_client_secret>
+  GMAIL_REFRESH_TOKEN: <gmail_refresh_token>
+  MONGODB_DSN: <mongodb_dsn>
+  POSTGRES_DSN: <postgres_dsn>
+---
+# Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mailcast-gmail-service-<company_id>
+  namespace: tenant-dev-doks
+  labels:
+    app: mailcast-gmail-service-<company_id>
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mailcast-gmail-service-<company_id>
+  template:
+    metadata:
+      labels:
+        app: mailcast-gmail-service-<company_id>
+    spec:
+      containers:
+      - name: mailcast-gmail-service
+        image: <image_registry>/mailcast-gmail-service:<version>
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8080
+          name: http
+        env:
+        # Server config
+        - name: PORT
+          value: "8080"
+        - name: READ_TIMEOUT
+          value: "30"
+        - name: WRITE_TIMEOUT
+          value: "30"
+        - name: MONGO_DB
+          value: "daisi"
+        
+        # Gmail OAuth + DB - from secret
+        - name: GMAIL_CLIENT_ID
+          valueFrom:
+            secretKeyRef:
+              name: mailcast-gmail-service-<company_id>-secret
+              key: GMAIL_CLIENT_ID
+        - name: GMAIL_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: mailcast-gmail-service-<company_id>-secret
+              key: GMAIL_CLIENT_SECRET
+        - name: GMAIL_REFRESH_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: mailcast-gmail-service-<company_id>-secret
+              key: GMAIL_REFRESH_TOKEN
+        - name: MONGODB_DSN
+          valueFrom:
+            secretKeyRef:
+              name: mailcast-gmail-service-<company_id>-secret
+              key: MONGODB_DSN
+        - name: POSTGRES_DSN
+          valueFrom:
+            secretKeyRef:
+              name: mailcast-gmail-service-<company_id>-secret
+              key: POSTGRES_DSN
+        - name: GMAIL_POLL_INTERVAL
+          value: "60"
+        - name: WHATSAPP_SERVICE_URL
+          value: "http://daisi-whatsapp-service-svc.infrastructure-dev-doks.svc.cluster.local"
+        - name: COMPANY_ID
+          value: "<company_id>"
+        - name: AGENT_ID
+          value: "<agent_id>"
+        - name: TOKEN
+          value: "<bearer_token>"
+        
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "25m"
+          limits:
+            memory: "256Mi"
+            cpu: "50m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 5
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+
+---
+# Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: mailcast-gmail-service-<company_id>
+  namespace: tenant-dev-doks
+  labels:
+    app: mailcast-gmail-service-<company_id>
+spec:
+  type: ClusterIP
+  selector:
+    app: mailcast-gmail-service-<company_id>
+  ports:
+  - port: 80
+    targetPort: 8080
+    protocol: TCP
+    name: http

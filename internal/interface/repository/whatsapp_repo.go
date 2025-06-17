@@ -39,6 +39,10 @@ func NewWhatsappRepository(logger logger.Logger) repository.WhatsappRepository {
 	}
 }
 
+type WhatsAppImageMessage struct {
+	URL string `json:"url"`
+}
+
 // SendPayload sends a payload to the WhatsApp service and returns task ID
 func (r *WhatsappRepository) SendPayload(ctx context.Context, payload *entity.Payload) (string, error) {
 	// Convert scheduleAt to UTC and format as ISO string
@@ -47,15 +51,15 @@ func (r *WhatsappRepository) SendPayload(ctx context.Context, payload *entity.Pa
 	// Build the message based on whether image is present
 	var msg entity.SendMailcastMessage
 
-	if payload.Image != "" {
+	if payload.Image != nil && payload.Image.URL != "" {
 		// Image message with caption
 		msg = entity.SendMailcastMessage{
 			CompanyID:   r.companyID,
 			AgentID:     r.agentID,
 			PhoneNumber: payload.Phone,
 			Message: entity.Message{
-				Image:   payload.Image, // The image URL
-				Caption: payload.Text,  // Text becomes caption for images
+				Image:   WhatsAppImageMessage{URL: payload.Image.URL},
+				Caption: payload.Text,
 			},
 			ScheduleAt: scheduleAtUTC,
 			Type:       "image",

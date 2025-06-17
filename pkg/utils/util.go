@@ -51,11 +51,18 @@ func ExtractPccId(body string) Pcc {
 	return globalParser.ExtractPccId(body)
 }
 
-func ExtractProviderPnr(body string) Pnr {
+func ExtractProviderPnr(body string) ProviderPnr {
 	if globalParser == nil {
 		panic("Global parser not initialized. Call InitializeGlobalParser first.")
 	}
 	return globalParser.ExtractProviderPnr(body)
+}
+
+func ExtractAirlinesPnr(body string) AirlinesPnr {
+	if globalParser == nil {
+		panic("Global parser not initialized. Call InitializeGlobalParser first.")
+	}
+	return globalParser.ExtractAirlinesPnr(body)
 }
 
 func ExtractPassengerList(body string) string {
@@ -72,12 +79,12 @@ func ExtractPassengerLastnameList(body string) string {
 	return globalParser.ExtractPassengerLastnameList(body)
 }
 
-func HasMatchingPassenger(listDb, listParam string) bool {
-	if globalParser == nil {
-		panic("Global parser not initialized. Call InitializeGlobalParser first.")
-	}
-	return globalParser.HasMatchingPassenger(listDb, listParam)
-}
+// func HasMatchingPassenger(listDb, listParam string) bool {
+// 	if globalParser == nil {
+// 		panic("Global parser not initialized. Call InitializeGlobalParser first.")
+// 	}
+// 	return globalParser.HasMatchingPassenger(listDb, listParam)
+// }
 
 func FormatPhoneList(phoneList []PhoneInfo) string {
 	if globalParser == nil {

@@ -8,33 +8,36 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-// NewMongoClient creates a new MongoDB client
-func NewMongoClient(ctx context.Context, uri, username, password string) (*mongo.Client, error) {
+// NewMongoClient creates a new MongoDB client and returns it with the database
+func NewMongoClient(ctx context.Context, uri, dbname string) (*mongo.Client, *mongo.Database, error) {
 	clientOptions := options.Client().ApplyURI(uri)
-	
-	if username != "" && password != "" {
-		clientOptions.SetAuth(options.Credential{
-			Username: username,
-			Password: password,
-		})
-	}
-	
+
+	// Only set auth if username and password are provided and not already in URI
+	// if username != "" && password != "" && !strings.Contains(uri, "@") {
+	// 	clientOptions.SetAuth(options.Credential{
+	// 		Username: username,
+	// 		Password: password,
+	// 	})
+	// }
+
 	// Set connection timeout
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	
+
 	client, err := mongo.Connect(ctx, clientOptions)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	
+
 	// Ping to check connection
 	err = client.Ping(ctx, nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	
-	return client, nil
+
+	db := client.Database(dbname)
+
+	return client, db, nil
 }
 
 // GetDatabase gets a database from the client

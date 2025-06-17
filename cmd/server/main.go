@@ -11,12 +11,10 @@ import (
 	"mailcast-service-v2/internal/infrastructure/config"
 	"mailcast-service-v2/internal/infrastructure/oauth"
 	"mailcast-service-v2/internal/infrastructure/persistence"
-	"mailcast-service-v2/internal/infrastructure/router"
 	"mailcast-service-v2/internal/interface/gmail"
 	mongoRepo "mailcast-service-v2/internal/interface/repository"
 	"mailcast-service-v2/pkg/logger"
 	"mailcast-service-v2/pkg/utils"
-	"mailcast-service-v2/templates"
 
 	airlineRepo "mailcast-service-v2/internal/interface/repository"
 	timezoneRepo "mailcast-service-v2/internal/interface/repository"
@@ -44,13 +42,13 @@ func main() {
 
 	// Set up MongoDB connection
 	log.Info("Connecting to MongoDB")
-	mongoClient, err := persistence.NewMongoClient(ctx, cfg.MongoURI, cfg.MongoUser, cfg.MongoPassword)
+	mongoClient, db, err := persistence.NewMongoClient(ctx, cfg.MongoURI, cfg.MongoDB)
 	if err != nil {
 		log.Fatal("Failed to connect to MongoDB", "error", err)
 	}
 
 	// Get database
-	db := persistence.GetDatabase(mongoClient, cfg.MongoDB)
+	// db := persistence.GetDatabase(mongoClient, cfg.MongoDB)
 
 	gormDB, err := gorm.Open(postgres.Open(cfg.PostgresURI), &gorm.Config{})
 	if err != nil {
@@ -66,15 +64,8 @@ func main() {
 	whatsappRepo := mongoRepo.NewWhatsappRepository(log)
 	flightRecordRepo := mongoRepo.NewMongoFlightRecordRepository(db)
 
-	emailParser := utils.NewEmailParser(timezoneRepository, log)
-	flightProcessor := flightUsecase.NewFlightProcessor(airlineRepository, timezoneRepository, emailRepo, whatsappRepo, flightRecordRepo, log, emailParser)
-	// emailParserV2 := utils.NewEmailParserV2(timezoneRepository, log)
-	// flightProcessorV2 := flightUsecase.NewFlightProcessorV2(airlineRepository, timezoneRepository, emailRepo, whatsappRepo, log, emailParserV2)
-
-	subjectRouter := router.NewSubjectRouter(log)
-	subjectRouter.Register(templates.NewFlightNotificationHandler(flightProcessor, log))
-	// subjectRouter.Register(templates.NewFlightNotificationHandlerV2(flightProcessorV2, log))
-	// subjectRouter.Register(templates.NewHappyBirthdayHandler(birthdayProcessor, log))
+	emailParserV2 := utils.NewEmailParserV2(timezoneRepository, log)
+	flightProcessorV2 := flightUsecase.NewFlightProcessorV2(airlineRepository, timezoneRepository, emailRepo, whatsappRepo, flightRecordRepo, log, emailParserV2)
 
 	// // Set up Gmail OAuth
 	gmailOAuth := oauth.NewGmailOAuth(
@@ -85,13 +76,13 @@ func main() {
 	)
 	tokenSource := gmailOAuth.GetTokenSource(ctx)
 
-	// // Set up Gmail service
+	// Set up Gmail service
 	gmailService, err := gmail.NewGmailService(ctx, tokenSource, emailRepo, log, cfg.GmailPollInterval)
 	if err != nil {
 		log.Fatal("Failed to create Gmail service", "error", err)
 	}
 
-	// // Start Gmail polling in a goroutine
+	// Start Gmail polling in a goroutine
 	go gmailService.StartPolling(ctx)
 
 	// Start email processor in a goroutine
@@ -106,7 +97,7 @@ func main() {
 				return
 			case <-processTicker.C:
 				log.Info("Processing pending emails")
-				if err := flightProcessor.ProcessPendingEmails(ctx); err != nil {
+				if err := flightProcessorV2.ProcessPendingEmails(ctx); err != nil {
 					log.Error("Error processing emails", "error", err)
 				}
 			}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -11,13 +12,13 @@ import (
 	"mailcast-service-v2/pkg/logger"
 )
 
-// EmailParser handles parsing email content with repository dependencies
+// EmailParserV2 handles parsing email content with repository dependencies
 type EmailParserV2 struct {
 	timezoneRepo repository.TimezoneRepository
 	logger       logger.Logger
 }
 
-// NewEmailParser creates a new email parser with dependencies
+// NewEmailParserV2 creates a new email parser with dependencies
 func NewEmailParserV2(timezoneRepo repository.TimezoneRepository, logger logger.Logger) *EmailParserV2 {
 	return &EmailParserV2{
 		timezoneRepo: timezoneRepo,
@@ -25,21 +26,38 @@ func NewEmailParserV2(timezoneRepo repository.TimezoneRepository, logger logger.
 	}
 }
 
-// ParseInt converts string to int
-// func ParseInt(value string) int {
-// 	parsedValue, _ := strconv.Atoi(value)
-// 	return parsedValue
-// }
+// cleanHTMLText removes HTML tags and cleans up text
+func (p *EmailParserV2) cleanHTMLText(text string) string {
+	// Remove HTML tags
+	re := regexp.MustCompile(`<[^>]*>`)
+	cleaned := re.ReplaceAllString(text, "")
 
-// ExtractPhoneList extracts phone information from email body
+	// Replace HTML entities
+	cleaned = strings.ReplaceAll(cleaned, "&nbsp;", " ")
+	cleaned = strings.ReplaceAll(cleaned, "&amp;", "&")
+	cleaned = strings.ReplaceAll(cleaned, "&lt;", "<")
+	cleaned = strings.ReplaceAll(cleaned, "&gt;", ">")
+	cleaned = strings.ReplaceAll(cleaned, "&#39;", "'")
+	cleaned = strings.ReplaceAll(cleaned, "&quot;", "\"")
+
+	// Clean up whitespace
+	cleaned = strings.TrimSpace(cleaned)
+
+	return cleaned
+}
+
+// ExtractPhoneList extracts phone information from email body (updated for new format)
 func (p *EmailParserV2) ExtractPhoneList(body string) []PhoneInfo {
-	// Updated regex pattern to match both formats
-	re := regexp.MustCompile(`(?m)^(\d{10,14})(?:/EN-|-)\d+([^\n]+)$`)
-	matches := re.FindAllStringSubmatch(body, -1)
+	// Clean HTML first
+	cleanBody := p.cleanHTMLText(body)
+
+	// Updated regex to handle both /EN- and - separators, and the new format
+	re := regexp.MustCompile(`/(\d{10,14})(?:/EN-|-)\d*([^/]+?)(?:\s*/\s*|$)`)
+	matches := re.FindAllStringSubmatch(cleanBody, -1)
 
 	var phoneList []PhoneInfo
 	for _, match := range matches {
-		if len(match) == 3 {
+		if len(match) >= 3 {
 			phoneInfo := PhoneInfo{
 				Phone: match[1],                    // The phone number part
 				Name:  strings.TrimSpace(match[2]), // The name part
@@ -48,12 +66,201 @@ func (p *EmailParserV2) ExtractPhoneList(body string) []PhoneInfo {
 		}
 	}
 
-	p.logger.Info("Extracted phone list", "count", len(phoneList))
+	p.logger.Info("Extracted phone list", "count", len(phoneList), "phones", phoneList)
 	return phoneList
 }
 
-// ExtractSchedule extracts flight schedule information from email body
+// ExtractScheduleFromHTML extracts flight schedule from HTML table format
+func (p *EmailParserV2) ExtractScheduleFromHTML(ctx context.Context, body string) []FlightSchedule {
+	var schedules []FlightSchedule
+
+	// Look for flight tables in HTML
+	tableRegex := regexp.MustCompile(`(?s)<table[^>]*>.*?</table>`)
+	tables := tableRegex.FindAllString(body, -1)
+
+	for _, table := range tables {
+		// Skip if it's not a flight details table
+		if !strings.Contains(table, "flight details") {
+			continue
+		}
+
+		// Extract rows from the table
+		rowRegex := regexp.MustCompile(`(?s)<tr[^>]*>(.*?)</tr>`)
+		rows := rowRegex.FindAllStringSubmatch(table, -1)
+
+		for _, row := range rows {
+			if len(row) < 2 {
+				continue
+			}
+
+			// Extract cells from the row
+			cellRegex := regexp.MustCompile(`(?s)<td[^>]*>(.*?)</td>`)
+			cells := cellRegex.FindAllStringSubmatch(row[1], -1)
+
+			// Skip header rows or rows without enough cells
+			if len(cells) < 8 {
+				continue
+			}
+
+			// Clean cell contents
+			var cleanCells []string
+			for _, cell := range cells {
+				cleaned := p.cleanHTMLText(cell[1])
+				cleanCells = append(cleanCells, cleaned)
+			}
+
+			// Skip if first cell doesn't look like a flight number
+			flightRegex := regexp.MustCompile(`^[A-Z]{1,3}\d+$`)
+			if !flightRegex.MatchString(cleanCells[0]) {
+				continue
+			}
+
+			// Parse the flight information
+			schedule, err := p.parseFlightRow(ctx, cleanCells)
+			if err != nil {
+				p.logger.Error("Error parsing flight row", "error", err, "cells", cleanCells)
+				continue
+			}
+
+			if schedule != nil {
+				schedules = append(schedules, *schedule)
+			}
+		}
+	}
+
+	p.logger.Info("Extracted schedules from HTML", "count", len(schedules))
+	return schedules
+}
+
+// parseFlightRow parses a single flight row from HTML table
+func (p *EmailParserV2) parseFlightRow(ctx context.Context, cells []string) (*FlightSchedule, error) {
+	if len(cells) < 8 {
+		return nil, fmt.Errorf("insufficient cells: %d", len(cells))
+	}
+
+	flightNo := cells[0]  // Flight
+	class := cells[1]     // Class
+	dateStr := cells[2]   // Date
+	fromStr := cells[3]   // From
+	toStr := cells[4]     // To
+	status := cells[5]    // Status
+	departStr := cells[6] // Depart
+	arriveStr := cells[7] // Arrive
+
+	// Extract airport codes from location strings (e.g., "CGK(Jakarta)" -> "CGK")
+	fromCode := p.extractAirportCode(fromStr)
+	toCode := p.extractAirportCode(toStr)
+
+	// Get timezone information
+	fromAirport, err := p.timezoneRepo.GetByAirportCode(ctx, fromCode)
+	if err != nil {
+		return nil, fmt.Errorf("error getting departure airport timezone for %s: %w", fromCode, err)
+	}
+
+	toAirport, err := p.timezoneRepo.GetByAirportCode(ctx, toCode)
+	if err != nil {
+		return nil, fmt.Errorf("error getting arrival airport timezone for %s: %w", toCode, err)
+	}
+
+	// Load timezone locations
+	departLocation, err := time.LoadLocation(fromAirport.TzName)
+	if err != nil {
+		return nil, fmt.Errorf("error loading departure location %s: %w", fromAirport.TzName, err)
+	}
+
+	arriveLocation, err := time.LoadLocation(toAirport.TzName)
+	if err != nil {
+		return nil, fmt.Errorf("error loading arrival location %s: %w", toAirport.TzName, err)
+	}
+
+	// Parse date and time
+	departDateTime, err := p.parseDateTime(dateStr, departStr, departLocation)
+	if err != nil {
+		return nil, fmt.Errorf("error parsing departure datetime: %w", err)
+	}
+
+	arriveDateTime, err := p.parseDateTime(dateStr, arriveStr, arriveLocation)
+	if err != nil {
+		return nil, fmt.Errorf("error parsing arrival datetime: %w", err)
+	}
+
+	schedule := &FlightSchedule{
+		SegNo:          1, // You might need to track this differently
+		FlightNo:       flightNo,
+		Class:          class,
+		From:           fromCode,
+		To:             toCode,
+		DepartDateTime: departDateTime,
+		ArriveDateTime: arriveDateTime,
+		Status:         status,
+	}
+
+	return schedule, nil
+}
+
+// extractAirportCode extracts airport code from location string like "CGK(Jakarta)"
+func (p *EmailParserV2) extractAirportCode(location string) string {
+	re := regexp.MustCompile(`^([A-Z]{3,4})`)
+	matches := re.FindStringSubmatch(location)
+	if len(matches) > 1 {
+		return matches[1]
+	}
+	return location // fallback to original string
+}
+
+// parseDateTime parses date and time from HTML table format
+func (p *EmailParserV2) parseDateTime(dateStr, timeStr string, location *time.Location) (time.Time, error) {
+	// Extract time from format like "05:30(Sun)"
+	timeRegex := regexp.MustCompile(`(\d{2}):(\d{2})`)
+	timeMatches := timeRegex.FindStringSubmatch(timeStr)
+	if len(timeMatches) < 3 {
+		return time.Time{}, fmt.Errorf("invalid time format: %s", timeStr)
+	}
+
+	// For now, return a placeholder - you'll need to implement proper date parsing
+	// based on your specific date format in the HTML
+	currentYear := time.Now().Year()
+
+	// Parse month from "01MAR" format
+	monthMap := map[string]time.Month{
+		"JAN": time.January, "FEB": time.February, "MAR": time.March,
+		"APR": time.April, "MAY": time.May, "JUN": time.June,
+		"JUL": time.July, "AUG": time.August, "SEP": time.September,
+		"OCT": time.October, "NOV": time.November, "DEC": time.December,
+	}
+
+	dayStr := dateStr[:2]
+	monthStr := dateStr[2:]
+
+	day, err := strconv.Atoi(dayStr)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid day: %s", dayStr)
+	}
+
+	month, exists := monthMap[monthStr]
+	if !exists {
+		return time.Time{}, fmt.Errorf("invalid month: %s", monthStr)
+	}
+
+	hour, _ := strconv.Atoi(timeMatches[1])
+	minute, _ := strconv.Atoi(timeMatches[2])
+
+	return time.Date(currentYear, month, day, hour, minute, 0, 0, location), nil
+}
+
+// ExtractSchedule - updated to handle both text and HTML formats
 func (p *EmailParserV2) ExtractSchedule(ctx context.Context, body string) []FlightSchedule {
+	// First try HTML format
+	if strings.Contains(body, "<table") {
+		return p.ExtractScheduleFromHTML(ctx, body)
+	}
+
+	// Fall back to original text parsing
+	return p.extractScheduleFromText(ctx, body)
+}
+
+// extractScheduleFromText - original text parsing method
+func (p *EmailParserV2) extractScheduleFromText(ctx context.Context, body string) []FlightSchedule {
 	lines := strings.Split(body, "\n")
 	var schedules []FlightSchedule
 
@@ -157,13 +364,14 @@ func (p *EmailParserV2) FormatSegments(segments []FlightSchedule) string {
 
 // IsScheduleChanged checks if the email indicates a schedule change
 func (p *EmailParserV2) IsScheduleChanged(body string) bool {
-	return strings.Contains(strings.ToLower(body), "schedule change")
+	return strings.Contains(body, "color:red")
 }
 
 // ExtractPccId extracts PCC ID from email body
 func (p *EmailParserV2) ExtractPccId(body string) Pcc {
-	re := regexp.MustCompile(`(?m)^PCC\s*:\s*(\S+)`)
-	match := re.FindStringSubmatch(body)
+	cleanBody := p.cleanHTMLText(body)
+	re := regexp.MustCompile(`(?i)PCC\s*:\s*(\S+)`)
+	match := re.FindStringSubmatch(cleanBody)
 
 	var pccList Pcc
 	if len(match) > 1 {
@@ -179,13 +387,14 @@ func (p *EmailParserV2) ExtractPccId(body string) Pcc {
 }
 
 // ExtractProviderPnr extracts Provider PNR from email body
-func (p *EmailParserV2) ExtractProviderPnr(body string) Pnr {
-	re := regexp.MustCompile(`(?m)^Provider PNR\s*:\s*(\S+)`)
-	match := re.FindStringSubmatch(body)
+func (p *EmailParserV2) ExtractProviderPnr(body string) ProviderPnr {
+	cleanBody := p.cleanHTMLText(body)
+	re := regexp.MustCompile(`(?i)Provider PNR\s*:\s*(\S+)`)
+	match := re.FindStringSubmatch(cleanBody)
 
-	var pnrList Pnr
+	var pnrList ProviderPnr
 	if len(match) > 1 {
-		pnrList = Pnr{
+		pnrList = ProviderPnr{
 			ProviderPnr: match[1],
 		}
 		p.logger.Info("Provider PNR found", "pnr", match[1])
@@ -200,9 +409,11 @@ func (p *EmailParserV2) ExtractProviderPnr(body string) Pnr {
 func (p *EmailParserV2) ExtractPassengerList(body string) string {
 	p.logger.Info("Starting passenger list extraction")
 
-	// Regex to capture everything under "Passenger List :" until the next empty line
-	reBlock := regexp.MustCompile(`(?s)Passenger List\s*:\s*(.*?)\n\s*\n`)
-	match := reBlock.FindStringSubmatch(body)
+	cleanBody := p.cleanHTMLText(body)
+
+	// Regex to capture everything under "Passenger List :" until the next section
+	reBlock := regexp.MustCompile(`(?s)Passenger List\s*:\s*(.*?)(?:\n\s*Phone list|\n\s*Schedule|\n\s*$)`)
+	match := reBlock.FindStringSubmatch(cleanBody)
 
 	if len(match) < 2 {
 		p.logger.Warn("Passenger list not found in email body")
@@ -213,32 +424,42 @@ func (p *EmailParserV2) ExtractPassengerList(body string) string {
 	lines := strings.Split(match[1], "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		if line != "" {
+		if line != "" && !strings.HasPrefix(line, "-") {
 			sb.WriteString(line + "\n")
 		}
 	}
 
 	result := sb.String()
-	p.logger.Info("Passenger list extraction completed", "length", len(result))
+	p.logger.Info("Passenger FirstName:", "count", len(result), "content", result)
 	return result
 }
 
 // ExtractPassengerLastnameList extracts passenger last names from email body
 func (p *EmailParserV2) ExtractPassengerLastnameList(body string) string {
-	p.logger.Info("Starting passenger lastname extraction")
 
-	// Regex to match lines under "Passenger List :"
-	re := regexp.MustCompile(`(?m)^([A-Z]+),`)
-	matches := re.FindAllStringSubmatch(body, -1)
+	cleanBody := p.cleanHTMLText(body)
 
-	var results []string
-	for _, match := range matches {
-		results = append(results, match[1])
+	// Look for the lastname section specifically
+	re := regexp.MustCompile(`(?i)Last Name:\s*([A-Z\s/]+)`)
+	match := re.FindStringSubmatch(cleanBody)
+
+	if len(match) > 1 {
+		// Split by / and clean up
+		names := strings.Split(match[1], "/")
+		var cleanNames []string
+		for _, name := range names {
+			name = strings.TrimSpace(name)
+			if name != "" {
+				cleanNames = append(cleanNames, name)
+			}
+		}
+		result := strings.Join(cleanNames, ", ")
+		p.logger.Info("Passenger Lastname:", "count", len(result), "content", result)
+		return result
 	}
 
-	finalOutput := strings.Join(results, ", ")
-	p.logger.Info("Passenger lastname extraction completed", "names", finalOutput)
-	return finalOutput
+	p.logger.Info("No passenger lastnames found")
+	return ""
 }
 
 // HasMatchingPassenger checks if any passenger from listDb exists in listParam

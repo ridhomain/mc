@@ -182,13 +182,13 @@ func (p *EmailParser) ExtractPccId(body string) Pcc {
 }
 
 // ExtractProviderPnr extracts Provider PNR from email body
-func (p *EmailParser) ExtractProviderPnr(body string) Pnr {
+func (p *EmailParser) ExtractProviderPnr(body string) ProviderPnr {
 	re := regexp.MustCompile(`(?m)^\*?Provider PNR\s*:\s*(\S+)\*?`)
 	match := re.FindStringSubmatch(body)
 
-	var pnrList Pnr
+	var pnrList ProviderPnr
 	if len(match) > 1 {
-		pnrList = Pnr{
+		pnrList = ProviderPnr{
 			ProviderPnr: match[1],
 		}
 		p.logger.Info("Provider PNR found", "pnr", match[1])
@@ -196,6 +196,23 @@ func (p *EmailParser) ExtractProviderPnr(body string) Pnr {
 	}
 
 	p.logger.Info("Provider PNR not found")
+	return pnrList
+}
+
+func (p *EmailParser) ExtractAirlinesPnr(body string) AirlinesPnr {
+	re := regexp.MustCompile(`(?m)^\*?Airlines PNR\s*:\s*(\S+)\*?`)
+	match := re.FindStringSubmatch(body)
+
+	var pnrList AirlinesPnr
+	if len(match) > 1 {
+		pnrList = AirlinesPnr{
+			AirlinesPnr: match[1],
+		}
+		p.logger.Info("Airlines PNR found", "pnr", match[1])
+		return pnrList
+	}
+
+	p.logger.Info("Airlines PNR not found")
 	return pnrList
 }
 

@@ -2,6 +2,7 @@ package templates
 
 import (
 	"context"
+	"regexp"
 	"strings"
 
 	"mailcast-service-v2/internal/domain/entity"
@@ -25,17 +26,14 @@ func NewFlightNotificationHandlerV2(flightProcessor *usecase.FlightProcessorV2, 
 
 // CanHandle determines if this handler can process the given email subject
 func (h *FlightNotificationHandlerV2) CanHandle(subject string) bool {
-	return strings.Contains(subject, "CGNLS3 test PNR")
+	return strings.Contains(subject, "PNR")
 }
 
 // Process processes the email and returns a payload
 func (h *FlightNotificationHandlerV2) Process(ctx context.Context, email *entity.Email) error {
-	// Use the email body (prefer HTML if available)
 	body := email.HTMLBody
-	if body == "" {
-		body = email.Body
-	}
 
+	h.logger.Info("Processing flight notification email", body)
 	// Use the flight processor to handle the complex flight logic
 	err := h.flightProcessor.ProcessFlightMessage(ctx, body, email.ID)
 	if err != nil {
@@ -47,8 +45,8 @@ func (h *FlightNotificationHandlerV2) Process(ctx context.Context, email *entity
 }
 
 // Helper function to extract recipient ID
-// func extractRecipientID(to string) string {
-// 	re := regexp.MustCompile(`[\w.-]+@[\w.-]+\.\w+`)
-// 	match := re.FindString(to)
-// 	return match
-// }
+func extractRecipientIDV2(to string) string {
+	re := regexp.MustCompile(`[\w.-]+@[\w.-]+\.\w+`)
+	match := re.FindString(to)
+	return match
+}

@@ -25,9 +25,14 @@ type Pcc struct {
 	PccId string
 }
 
-// Pnr represents PNR information
-type Pnr struct {
+// ProviderPnr represents Provider PNR information
+type ProviderPnr struct {
 	ProviderPnr string
+}
+
+// AirlinesPnr represents Airlines PNR information
+type AirlinesPnr struct {
+	AirlinesPnr string
 }
 
 // Constants

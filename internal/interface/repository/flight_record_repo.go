@@ -53,19 +53,49 @@ func (r *MongoFlightRecordRepository) FindByBookingKey(ctx context.Context, book
 
 // Upsert creates or updates a flight record
 func (r *MongoFlightRecordRepository) Upsert(ctx context.Context, record *entity.FlightRecord) error {
+	record.UpdatedAt = time.Now()
+
+	// For new records
 	if record.ID == "" {
 		record.ID = primitive.NewObjectID().Hex()
 		record.CreatedAt = time.Now()
 	}
-	record.UpdatedAt = time.Now()
 
-	opts := options.Replace().SetUpsert(true)
-	_, err := r.collection.ReplaceOne(
+	// Create a copy without ID for the update
+	updateDoc := bson.M{
+		"bookingKey":        record.BookingKey,
+		"providerPnr":       record.ProviderPNR,
+		"airlinesPnr":       record.AirlinesPNR,
+		"passengerName":     record.PassengerName,
+		"phoneNumber":       record.PhoneNumber,
+		"flightNumber":      record.FlightNumber,
+		"departureUtc":      record.DepartureUTC,
+		"arrivalUtc":        record.ArrivalUTC,
+		"departureAirport":  record.DepartureAirport,
+		"arrivalAirport":    record.ArrivalAirport,
+		"oldDepartureUtc":   record.OldDepartureUTC,
+		"isScheduleChanged": record.IsScheduleChanged,
+		"lastTaskId":        record.LastTaskID,
+		"lastScheduledAt":   record.LastScheduledAt,
+		"createdAt":         record.CreatedAt,
+		"updatedAt":         record.UpdatedAt,
+	}
+
+	opts := options.Update().SetUpsert(true)
+	filter := bson.M{"bookingKey": record.BookingKey}
+
+	result, err := r.collection.UpdateOne(
 		ctx,
-		bson.M{"bookingKey": record.BookingKey},
-		record,
+		filter,
+		bson.M{"$set": updateDoc},
 		opts,
 	)
+
+	// If it was an insert, we need to get the new ID
+	if result.UpsertedCount > 0 && result.UpsertedID != nil {
+		record.ID = result.UpsertedID.(primitive.ObjectID).Hex()
+	}
+
 	return err
 }
 

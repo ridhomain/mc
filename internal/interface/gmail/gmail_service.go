@@ -57,23 +57,51 @@ func (s *GmailService) FetchEmails(ctx context.Context) error {
 		return err
 	}
 
+	if len(resp.Messages) == 0 {
+		s.logger.Info("No new messages found")
+		return nil
+	}
+
+	// Extract all message IDs for batch checking
+	emailIDs := make([]string, len(resp.Messages))
+	for i, msg := range resp.Messages {
+		emailIDs[i] = msg.Id
+	}
+
+	// Batch check which emails already exist
+	existingEmails, err := s.emailRepo.FindByEmailIDs(ctx, emailIDs)
+	if err != nil {
+		s.logger.Error("Failed to batch check existing emails", "error", err)
+		// Fall back to individual processing if batch check fails
+		existingEmails = make(map[string]*entity.Email)
+	}
+
+	// Process only new emails
+	newEmailsCount := 0
 	for _, msg := range resp.Messages {
+		// Skip if email already exists
+		if _, exists := existingEmails[msg.Id]; exists {
+			s.logger.Debug("Email already exists, skipping", "emailID", msg.Id)
+			continue
+		}
+
 		// Get the full message
 		fullMsg, err := s.gmailService.Users.Messages.Get("me", msg.Id).Do()
 		if err != nil {
-			s.logger.Error("Failed to get message", "messageID", msg.Id, "error", err)
+			s.logger.Error("Failed to get message", "emailID", msg.Id, "error", err)
 			continue
 		}
 
 		messageTime := time.Unix(0, fullMsg.InternalDate*int64(time.Millisecond))
 		if messageTime.Before(fetchFrom) {
 			s.logger.Info("Message is older than poll interval", "messageID", msg.Id, "messageTime", messageTime)
-			continue
+			// continue
 		}
+
 		// Convert to our domain entity
 		email, err := s.convertToEmail(fullMsg)
 		if err != nil {
-			s.logger.Error("Failed to convert message", "messageID", msg.Id, "error", err)
+			s.logger.Error("Failed to convert message", "emailID", msg.Id, "error", err)
 			continue
 		}
 
@@ -85,12 +113,18 @@ func (s *GmailService) FetchEmails(ctx context.Context) error {
 		// Save to repository
 		err = s.emailRepo.Save(ctx, email)
 		if err != nil {
-			s.logger.Error("Failed to save email", "messageID", msg.Id, "error", err)
+			s.logger.Error("Failed to save email", "emailID", msg.Id, "error", err)
 			continue
 		}
 
-		s.logger.Info("Email fetched and saved", "emailID", email.ID)
+		s.logger.Info("Email fetched and saved", "emailID", email.EmailID)
+		newEmailsCount++
 	}
+
+	s.logger.Info("Email fetch completed",
+		"totalMessages", len(resp.Messages),
+		"existingEmails", len(existingEmails),
+		"newEmailsSaved", newEmailsCount)
 
 	return nil
 }
@@ -115,20 +149,18 @@ func (s *GmailService) StartPolling(ctx context.Context) {
 }
 
 func (s *GmailService) FilterPattern(subject string) bool {
-	if strings.Contains(strings.ToUpper(subject), "PREFLIGHT INFO GALILEO") ||
-		strings.Contains(strings.ToUpper(subject), "[PREFLIGHT INFO GALILEO]") {
+	if strings.Contains(subject, "PNR") {
 		return true
 	}
 	return false
-
 }
 
 // convertToEmail converts a Gmail message to our domain entity
 func (s *GmailService) convertToEmail(msg *gmail.Message) (*entity.Email, error) {
 	email := &entity.Email{
-		ID:        msg.Id,
-		MessageID: msg.Id,
-		Labels:    msg.LabelIds,
+		// ID:        msg.Id,
+		EmailID: msg.Id,
+		Labels:  msg.LabelIds,
 	}
 
 	// Extract header information

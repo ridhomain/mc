@@ -14,12 +14,13 @@ import (
 
 // FlightProcessorV2 handles flight email processing logic
 type FlightProcessorV2 struct {
-	airlineRepo  repository.AirlineRepository
-	timezoneRepo repository.TimezoneRepository
-	emailRepo    repository.EmailRepository
-	whatsappRepo repository.WhatsappRepository
-	emailParser  *utils.EmailParserV2
-	logger       logger.Logger
+	airlineRepo      repository.AirlineRepository
+	timezoneRepo     repository.TimezoneRepository
+	emailRepo        repository.EmailRepository
+	whatsappRepo     repository.WhatsappRepository
+	flightRecordRepo repository.FlightRecordRepository
+	emailParser      *utils.EmailParserV2
+	logger           logger.Logger
 }
 
 // NewFlightProcessor creates a new flight processor
@@ -28,45 +29,40 @@ func NewFlightProcessorV2(
 	timezoneRepo repository.TimezoneRepository,
 	emailRepo repository.EmailRepository,
 	whatsappRepo repository.WhatsappRepository,
+	flightRecordRepo repository.FlightRecordRepository,
 	logger logger.Logger,
 	emailParser *utils.EmailParserV2,
 ) *FlightProcessorV2 {
 	return &FlightProcessorV2{
-		airlineRepo:  airlineRepo,
-		timezoneRepo: timezoneRepo,
-		emailRepo:    emailRepo,
-		whatsappRepo: whatsappRepo,
-		logger:       logger,
-		emailParser:  emailParser,
+		airlineRepo:      airlineRepo,
+		timezoneRepo:     timezoneRepo,
+		emailRepo:        emailRepo,
+		whatsappRepo:     whatsappRepo,
+		flightRecordRepo: flightRecordRepo,
+		logger:           logger,
+		emailParser:      emailParser,
 	}
-}
-
-func (fp *FlightProcessorV2) getListTaskByPnrAndLastName(ctx context.Context, providerPnr string, psgList string) []*entity.TaskSchedule {
-	// todo fetch to api
-	return []*entity.TaskSchedule{}
 }
 
 // ProcessFlightMessage processes flight notification messages
 func (fp *FlightProcessorV2) ProcessFlightMessage(ctx context.Context, body string, id string) error {
 	fp.logger.Info("Starting flight message processing")
-	fmt.Println(body, "< ==== body")
-	phoneList := fp.emailParser.ExtractPhoneList(body)
-	fmt.Printf("Extracted Phone List: %v\n", phoneList)
-	isScheduleChanged := fp.emailParser.IsScheduleChanged(body)
-	pnrList := fp.emailParser.ExtractProviderPnr(body)
-	passengerList := fp.emailParser.ExtractPassengerLastnameList(body)
-	listTaskFresh := fp.getListTaskByPnrAndLastName(ctx, pnrList.ProviderPnr, passengerList)
-
-	msgPhoneList := fp.emailParser.FormatPhoneList(phoneList)
-
-	schedules := fp.emailParser.ExtractSchedule(ctx, body)
-	fp.logger.Info("Extracted schedules", "count", len(schedules))
-
-	// temporary
 	extractedData := make(map[string]interface{})
 
-	// Process each phone and schedule combination
-	var messages []map[string]interface{}
+	phoneList := fp.emailParser.ExtractPhoneList(body)
+	extractedData["phoneCount"] = len(phoneList)
+	isScheduleChanged := fp.emailParser.IsScheduleChanged(body)
+	extractedData["isScheduleChanged"] = isScheduleChanged
+	pnrList := fp.emailParser.ExtractProviderPnr(body)
+	extractedData["providerPnr"] = pnrList.ProviderPnr
+	passengerList := fp.emailParser.ExtractPassengerLastnameList(body)
+	extractedData["passengers"] = passengerList
+
+	msgPhoneList := fp.emailParser.FormatPhoneList(phoneList)
+	schedules := fp.emailParser.ExtractSchedule(ctx, body)
+	extractedData["scheduleCount"] = len(schedules)
+
+	var processError error
 
 	for _, phoneInfo := range phoneList {
 		fp.logger.Info("Processing phone", "phone", phoneInfo.Phone, "name", phoneInfo.Name)
@@ -79,6 +75,7 @@ func (fp *FlightProcessorV2) ProcessFlightMessage(ctx context.Context, body stri
 			msg, location, arrivalLocation, err := fp.prepareMessageAndLocations(ctx, schedule, phoneInfo.Name, msgPhoneList)
 			if err != nil {
 				fp.logger.Error("Failed to prepare message", "error", err)
+				processError = err
 				continue
 			}
 
@@ -87,31 +84,32 @@ func (fp *FlightProcessorV2) ProcessFlightMessage(ctx context.Context, body stri
 				continue
 			}
 
-			var messageData map[string]interface{}
-
 			if isScheduleChanged {
-				fp.logger.Info("Processing schedule change", "segment", i)
-				if len(listTaskFresh) > 0 {
-					// fp.logger.Info("Found existing task for schedule change", "segment", i, "task_count", len(listTaskFresh))
-					messageData = fp.handleScheduleChange(i, msg, schedule, phoneInfo, pnrList.ProviderPnr, passengerList)
-				}
+				fp.handleScheduleChange(i, msg, schedule, phoneInfo, pnrList.ProviderPnr, passengerList)
+
 			} else {
 				fp.logger.Info("Processing regular schedule", "segment", i)
-				messageData = fp.handleRegularSchedule(i, phoneInfo, msg, schedule.DepartDateTime, prevArrivalDateTime, segmentDetails, pnrList.ProviderPnr, passengerList, schedule, msgPhoneList)
-			}
-
-			if messageData != nil {
-				messages = append(messages, messageData)
+				fp.handleRegularSchedule(i, phoneInfo, msg, schedule.DepartDateTime, prevArrivalDateTime, segmentDetails, pnrList.ProviderPnr, passengerList, schedule, msgPhoneList)
 			}
 
 			prevArrivalDateTime = schedule.ArriveDateTime
 		}
 	}
 
-	// fp.emailRepo.MarkAsProcessed(ctx, id, "processed")
+	// Mark email as processed with metadata
+	status := "processed"
+	errorDetail := ""
+	if processError != nil {
+		status = "failed"
+		errorDetail = processError.Error()
+	}
 
-	// temp hard coded
-	fp.emailRepo.MarkAsProcessed(ctx, id, "", "flight", "errorDetail", extractedData)
+	err := fp.emailRepo.MarkAsProcessed(ctx, id, status, "flight", errorDetail, extractedData)
+	if err != nil {
+		fp.logger.Error("Failed to mark email as processed", "emailID", id, "error", err)
+	} else {
+		fp.logger.Info("Email marked as processed", "emailID", id, "status", status)
+	}
 
 	return nil
 }
@@ -158,7 +156,6 @@ func (fp *FlightProcessorV2) prepareMessageAndLocations(ctx context.Context, sch
 		return "", nil, nil, err
 	}
 
-	// Create message template (you'll need to define MSG_TEMPLATE constant)
 	msg := fmt.Sprintf(utils.MSG_TEMPLATE,
 		name,
 		msgPhoneList,
@@ -272,15 +269,6 @@ func (fp *FlightProcessorV2) handleScheduleChange(i int, msg string, schedule ut
 	return nil
 }
 
-func (fp *FlightProcessorV2) formatSegments(schedules []utils.FlightSchedule) string {
-	var segments []string
-	for _, schedule := range schedules {
-		segment := fmt.Sprintf("Flight %s: %s to %s", schedule.FlightNo, schedule.From, schedule.To)
-		segments = append(segments, segment)
-	}
-	return strings.Join(segments, "\n")
-}
-
 func (fp *FlightProcessorV2) ProcessPendingEmails(ctx context.Context) error {
 	emails, err := fp.emailRepo.FindUnprocessed(ctx, 100)
 	if err != nil {
@@ -291,7 +279,7 @@ func (fp *FlightProcessorV2) ProcessPendingEmails(ctx context.Context) error {
 	fp.logger.Info("Found unprocessed emails", "count", len(emails))
 
 	for _, email := range emails {
-		err := fp.ProcessFlightMessage(ctx, email.Body, email.ID)
+		err := fp.ProcessFlightMessage(ctx, email.HTMLBody, email.ID)
 		if err != nil {
 			fp.logger.Error("Failed to process email", "emailID", email.ID, "error", err)
 			// Continue with the next email
