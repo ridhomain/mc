@@ -20,7 +20,7 @@ type MongoFlightRecordRepository struct {
 
 // NewMongoFlightRecordRepository creates a new flight record repository
 func NewMongoFlightRecordRepository(db *mongo.Database) repository.FlightRecordRepository {
-	collection := db.Collection("flight_records")
+	collection := db.Collection("flightRecords")
 
 	// Create unique index on bookingKey
 	ctx := context.Background()

@@ -1,3 +1,4 @@
+// cmd/server/main.go
 package main
 
 import (
@@ -12,17 +13,12 @@ import (
 	"mailcast-service-v2/internal/infrastructure/oauth"
 	"mailcast-service-v2/internal/infrastructure/persistence"
 	"mailcast-service-v2/internal/interface/gmail"
-	mongoRepo "mailcast-service-v2/internal/interface/repository"
+	"mailcast-service-v2/internal/interface/repository"
+	"mailcast-service-v2/internal/usecase"
 	"mailcast-service-v2/pkg/logger"
 	"mailcast-service-v2/pkg/utils"
 
-	airlineRepo "mailcast-service-v2/internal/interface/repository"
-	timezoneRepo "mailcast-service-v2/internal/interface/repository"
-	flightUsecase "mailcast-service-v2/internal/usecase"
-
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"gorm.io/driver/postgres"
-	"gorm.io/gorm"
 )
 
 func main() {
@@ -47,27 +43,28 @@ func main() {
 		log.Fatal("Failed to connect to MongoDB", "error", err)
 	}
 
-	// Get database
-	// db := persistence.GetDatabase(mongoClient, cfg.MongoDB)
-
-	gormDB, err := gorm.Open(postgres.Open(cfg.PostgresURI), &gorm.Config{})
-	if err != nil {
-		log.Fatal("Failed to connect to PostgreSQL", "error", err)
-	}
-
-	// Set up airline and timezone repositories
-	airlineRepository := airlineRepo.NewGormAirlineRepository(gormDB)
-	timezoneRepository := timezoneRepo.NewGormTimezoneRepository(gormDB)
-
 	// Set up repositories
-	emailRepo := mongoRepo.NewMongoEmailRepository(db)
-	whatsappRepo := mongoRepo.NewWhatsappRepository(log)
-	flightRecordRepo := mongoRepo.NewMongoFlightRecordRepository(db)
+	emailRepo := repository.NewMongoEmailRepository(db)
+	whatsappRepo := repository.NewWhatsappRepository(log)
+	flightRecordRepo := repository.NewMongoFlightRecordRepository(db)
+	airlineRepository := repository.NewMongoAirlineRepository(db)
+	timezoneRepository := repository.NewMongoTimezoneRepository(db)
 
+	// Initialize email parser V2
 	emailParserV2 := utils.NewEmailParserV2(timezoneRepository, log)
-	flightProcessorV2 := flightUsecase.NewFlightProcessorV2(airlineRepository, timezoneRepository, emailRepo, whatsappRepo, flightRecordRepo, log, emailParserV2)
 
-	// // Set up Gmail OAuth
+	// Initialize flight processor V2
+	flightProcessorV2 := usecase.NewFlightProcessorV2(
+		airlineRepository,
+		timezoneRepository,
+		emailRepo,
+		whatsappRepo,
+		flightRecordRepo,
+		log,
+		emailParserV2,
+	)
+
+	// Set up Gmail OAuth
 	gmailOAuth := oauth.NewGmailOAuth(
 		cfg.GmailClientID,
 		cfg.GmailClientSecret,

@@ -1,3 +1,4 @@
+// internal/infrastructure/config/config.go
 package config
 
 import (
@@ -29,11 +30,6 @@ type Config struct {
 
 	// WhatsApp
 	WhatsAppEndpoint string
-
-	PostgresURI      string
-	PostgresUser     string
-	PostgresPassword string
-	PostgresDB       string
 }
 
 // LoadConfig loads configuration from environment variables
@@ -58,8 +54,6 @@ func LoadConfig() (*Config, error) {
 		GmailPollInterval: time.Duration(getEnvAsInt("GMAIL_POLL_INTERVAL", 60)) * time.Second,
 
 		WhatsAppEndpoint: getEnv("WHATSAPP_ENDPOINT", ""),
-
-		PostgresURI: getEnv("POSTGRES_DSN", ""),
 	}
 
 	return config, nil

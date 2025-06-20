@@ -1,91 +1,50 @@
+// internal/interface/repository/timezone_repo.go
 package repository
 
 import (
 	"context"
-	"time"
 
 	"mailcast-service-v2/internal/domain/entity"
 	"mailcast-service-v2/internal/domain/repository"
 
-	"gorm.io/gorm"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-// GormTimezoneRepository implements the TimezoneRepository interface
-type GormTimezoneRepository struct {
-	db *gorm.DB
+// MongoTimezoneRepository implements the TimezoneRepository interface
+type MongoTimezoneRepository struct {
+	collection *mongo.Collection
 }
 
-// NewGormTimezoneRepository creates a new GORM timezone repository
-func NewGormTimezoneRepository(db *gorm.DB) repository.TimezoneRepository {
-	return &GormTimezoneRepository{
-		db: db,
+// NewMongoTimezoneRepository creates a new MongoDB timezone repository
+func NewMongoTimezoneRepository(db *mongo.Database) repository.TimezoneRepository {
+	collection := db.Collection("mtimezonelist")
+
+	// Create index on airportCode for better performance
+	ctx := context.Background()
+	indexModel := mongo.IndexModel{
+		Keys:    bson.M{"airportCode": 1},
+		Options: options.Index().SetUnique(true),
 	}
-}
+	collection.Indexes().CreateOne(ctx, indexModel)
 
-// Timezonelist GORM model for database mapping
-type Timezonelist struct {
-	gorm.Model
-	ID          uint           `gorm:"primaryKey"`
-	AirportCode string         `gorm:"column:airportcode;unique"`
-	AirportName string         `gorm:"column:airport_name"`
-	CityCode    string         `gorm:"column:citycode"`
-	CityName    string         `gorm:"column:cityname"`
-	GmtTz       string         `gorm:"column:gmttz"`
-	TzName      string         `gorm:"column:tzname"`
-	DeletedAt   gorm.DeletedAt `gorm:"index"`
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
-}
-
-// TableName overrides the default table name
-func (Timezonelist) TableName() string {
-	return "m_timezone_list"
+	return &MongoTimezoneRepository{
+		collection: collection,
+	}
 }
 
 // GetByAirportCode finds a timezone by airport code
-func (r *GormTimezoneRepository) GetByAirportCode(ctx context.Context, code string) (*entity.Timezone, error) {
-	var timezone Timezonelist
-	result := r.db.WithContext(ctx).Unscoped().Where("airportcode = ?", code).First(&timezone)
-
-	if result.Error != nil {
-		return nil, result.Error
+func (r *MongoTimezoneRepository) GetByAirportCode(ctx context.Context, code string) (*entity.Timezone, error) {
+	var timezone entity.Timezone
+	err := r.collection.FindOne(ctx, bson.M{"airportCode": code}).Decode(&timezone)
+	if err != nil {
+		return nil, err
 	}
-
-	// Convert GORM model to domain entity
-	return &entity.Timezone{
-		ID:          timezone.ID,
-		AirportCode: timezone.AirportCode,
-		AirportName: timezone.AirportName,
-		CityCode:    timezone.CityCode,
-		CityName:    timezone.CityName,
-		GmtTz:       timezone.GmtTz,
-		TzName:      timezone.TzName,
-		CreatedAt:   timezone.CreatedAt,
-		UpdatedAt:   timezone.UpdatedAt,
-		DeletedAt:   timezone.DeletedAt,
-	}, nil
+	return &timezone, nil
 }
 
 // GetTimezoneByCode retrieves a timezone by its code
-func (r *GormTimezoneRepository) GetTimezoneByCode(ctx context.Context, code string) (*entity.Timezone, error) {
-	var timezone Timezonelist
-	result := r.db.WithContext(ctx).Unscoped().Where("airportcode = ?", code).First(&timezone)
-
-	if result.Error != nil {
-		return nil, result.Error
-	}
-
-	// Convert GORM model to domain entity
-	return &entity.Timezone{
-		ID:          timezone.ID,
-		AirportCode: timezone.AirportCode,
-		AirportName: timezone.AirportName,
-		CityCode:    timezone.CityCode,
-		CityName:    timezone.CityName,
-		GmtTz:       timezone.GmtTz,
-		TzName:      timezone.TzName,
-		CreatedAt:   timezone.CreatedAt,
-		UpdatedAt:   timezone.UpdatedAt,
-		DeletedAt:   timezone.DeletedAt,
-	}, nil
+func (r *MongoTimezoneRepository) GetTimezoneByCode(ctx context.Context, code string) (*entity.Timezone, error) {
+	return r.GetByAirportCode(ctx, code)
 }

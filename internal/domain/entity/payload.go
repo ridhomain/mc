@@ -1,3 +1,4 @@
+// internal/domain/entity/payload.go
 package entity
 
 import (

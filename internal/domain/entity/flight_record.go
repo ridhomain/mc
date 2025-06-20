@@ -1,3 +1,4 @@
+// internal/domain/entity/flight_record.go
 package entity
 
 import (
@@ -6,7 +7,7 @@ import (
 
 type FlightRecord struct {
 	ID                string     `bson:"_id,omitempty"`
-	BookingKey        string     `bson:"bookingKey"` // {name}:{pnr} - unique index
+	BookingKey        string     `bson:"bookingKey"` // {name}:{pnr}:{segmentNo} - unique index
 	ProviderPNR       string     `bson:"providerPnr"`
 	AirlinesPNR       string     `bson:"airlinesPnr"`
 	PassengerName     string     `bson:"passengerName"`
