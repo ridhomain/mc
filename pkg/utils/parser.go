@@ -35,17 +35,25 @@ func ParseInt(value string) int {
 // ExtractPhoneList extracts phone information from email body
 func (p *EmailParser) ExtractPhoneList(body string) []PhoneInfo {
 	// Updated regex pattern to match both formats
+	// Log here
 	p.logger.Info("Extracted phone list", "body", body)
 
-	re := regexp.MustCompile(`\*?(\d{10,14})\*?(?:\*/EN-|-)\d*([^*\n]+?)(?:\s*Schedule[^:]*:|\s*\*|$)`)
+	re := regexp.MustCompile(`(?m)^(\d{10,14})(?:/EN-|-)\d+([^\n]+)$`)
 	matches := re.FindAllStringSubmatch(body, -1)
 
 	var phoneList []PhoneInfo
 	for _, match := range matches {
 		if len(match) == 3 {
+			phone := match[1]
+
+			// Convert phone number starting with 0 to 62
+			if strings.HasPrefix(phone, "0") {
+				phone = "62" + phone[1:]
+			}
+
 			phoneInfo := PhoneInfo{
-				Phone: match[1],                    // The phone number part
-				Name:  strings.TrimSpace(match[2]), // The name part
+				Phone: phone,
+				Name:  strings.TrimSpace(match[2]),
 			}
 			phoneList = append(phoneList, phoneInfo)
 		}
@@ -57,7 +65,9 @@ func (p *EmailParser) ExtractPhoneList(body string) []PhoneInfo {
 
 // ExtractSchedule extracts flight schedule information from email body
 func (p *EmailParser) ExtractSchedule(ctx context.Context, body string) []FlightSchedule {
-	lines := strings.Split(body, "\n")
+	normalizedBody := strings.ReplaceAll(body, "\r\n", "\n")
+	normalizedBody = strings.ReplaceAll(normalizedBody, "\r", "\n")
+	lines := strings.Split(normalizedBody, "\n")
 	var schedules []FlightSchedule
 
 	// Adjusted regular expression to allow for more flexible spacing between columns
@@ -67,7 +77,6 @@ func (p *EmailParser) ExtractSchedule(ctx context.Context, body string) []Flight
 
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		p.logger.Debug("Processing line", "line", line)
 
 		if strings.Contains(line, "SegNo FlightNo Class From  To") {
 			scheduleStart = true
@@ -183,7 +192,7 @@ func (p *EmailParser) ExtractPccId(body string) Pcc {
 
 // ExtractProviderPnr extracts Provider PNR from email body
 func (p *EmailParser) ExtractProviderPnr(body string) ProviderPnr {
-	re := regexp.MustCompile(`(?m)^\*?Provider PNR\s*:\s*(\S+)\*?`)
+	re := regexp.MustCompile(`(?m)^Provider PNR\s*:\s*(\S+)`)
 	match := re.FindStringSubmatch(body)
 
 	var pnrList ProviderPnr
@@ -200,7 +209,7 @@ func (p *EmailParser) ExtractProviderPnr(body string) ProviderPnr {
 }
 
 func (p *EmailParser) ExtractAirlinesPnr(body string) AirlinesPnr {
-	re := regexp.MustCompile(`(?m)^\*?Airlines PNR\s*:\s*(\S+)\*?`)
+	re := regexp.MustCompile(`(?m)^Airlines PNR\s*:\s*(\S+)`)
 	match := re.FindStringSubmatch(body)
 
 	var pnrList AirlinesPnr
@@ -248,7 +257,7 @@ func (p *EmailParser) ExtractPassengerLastnameList(body string) string {
 	p.logger.Info("Starting passenger lastname extraction")
 
 	// Regex to match lines under "Passenger List :"
-	re := regexp.MustCompile(`(?m)^\*?([A-Z]+),`)
+	re := regexp.MustCompile(`(?m)^([A-Z]+),`)
 	matches := re.FindAllStringSubmatch(body, -1)
 
 	var results []string

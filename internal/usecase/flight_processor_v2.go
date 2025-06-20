@@ -45,7 +45,7 @@ func NewFlightProcessorV2(
 }
 
 // ProcessFlightMessage processes flight notification messages
-func (fp *FlightProcessorV2) ProcessFlightMessage(ctx context.Context, body string, id string) error {
+func (fp *FlightProcessorV2) ProcessFlightMessage(ctx context.Context, body string, emailID string) error {
 	fp.logger.Info("Starting flight message processing")
 	extractedData := make(map[string]interface{})
 
@@ -104,11 +104,11 @@ func (fp *FlightProcessorV2) ProcessFlightMessage(ctx context.Context, body stri
 		errorDetail = processError.Error()
 	}
 
-	err := fp.emailRepo.MarkAsProcessed(ctx, id, status, "flight", errorDetail, extractedData)
+	err := fp.emailRepo.MarkAsProcessedByEmailID(ctx, emailID, status, "flight", errorDetail, extractedData)
 	if err != nil {
-		fp.logger.Error("Failed to mark email as processed", "emailID", id, "error", err)
+		fp.logger.Error("Failed to mark email as processed", "emailID", emailID, "error", err)
 	} else {
-		fp.logger.Info("Email marked as processed", "emailID", id, "status", status)
+		fp.logger.Info("Email marked as processed", "emailID", emailID, "status", status)
 	}
 
 	return nil

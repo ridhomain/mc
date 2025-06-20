@@ -41,16 +41,35 @@ func NewGmailService(ctx context.Context, tokenSource oauth2.TokenSource, emailR
 
 // FetchEmails fetches new emails from Gmail
 func (s *GmailService) FetchEmails(ctx context.Context) error {
-	// Get messages from Gmail
 	lastEmailAt, _ := s.emailRepo.GetLastEmail(ctx)
 	var fetchFrom time.Time
-	if lastEmailAt != nil {
+	var hasLastEmail bool
+
+	if lastEmailAt != nil && !lastEmailAt.ReceivedAt.IsZero() {
 		fetchFrom = lastEmailAt.ReceivedAt
+		hasLastEmail = true
+		s.logger.Info("Using last received email time",
+			"lastReceivedEmailTime", fetchFrom.Format("2006-01-02 15:04:05 UTC"))
 	} else {
+		// Default starting point
 		fetchFrom = time.Date(2024, 6, 10, 0, 0, 0, 0, time.UTC)
+		hasLastEmail = false
+		s.logger.Info("No previous emails, using default start date",
+			"startDate", fetchFrom.Format("2006-01-02 15:04:05 UTC"))
 	}
-	fmt.Println("Fetching emails after:", fetchFrom.Format("2006/01/02"))
-	req := s.gmailService.Users.Messages.List("me").Q(fmt.Sprintf("after:%s", fetchFrom.Format("2006/01/02")))
+
+	queryDate := fetchFrom
+	if hasLastEmail {
+		// Go back 3 day to catch any emails we might have missed
+		queryDate = fetchFrom.AddDate(0, 0, -3)
+	}
+
+	query := fmt.Sprintf("after:%s", queryDate.Format("2006/01/02"))
+	s.logger.Info("Querying Gmail",
+		"query", query,
+		"actualCutoffTime", fetchFrom.Format("2006-01-02 15:04:05 UTC"))
+
+	req := s.gmailService.Users.Messages.List("me").Q(query)
 	resp, err := req.Do()
 	if err != nil {
 		s.logger.Error("Failed to list messages", "error", err)
@@ -62,30 +81,29 @@ func (s *GmailService) FetchEmails(ctx context.Context) error {
 		return nil
 	}
 
-	// Extract all message IDs for batch checking
 	emailIDs := make([]string, len(resp.Messages))
 	for i, msg := range resp.Messages {
 		emailIDs[i] = msg.Id
 	}
 
-	// Batch check which emails already exist
 	existingEmails, err := s.emailRepo.FindByEmailIDs(ctx, emailIDs)
 	if err != nil {
 		s.logger.Error("Failed to batch check existing emails", "error", err)
-		// Fall back to individual processing if batch check fails
 		existingEmails = make(map[string]*entity.Email)
 	}
 
-	// Process only new emails
 	newEmailsCount := 0
+	skippedOldCount := 0
+	skippedExistingCount := 0
+
 	for _, msg := range resp.Messages {
-		// Skip if email already exists
+		// Skip if already in database
 		if _, exists := existingEmails[msg.Id]; exists {
-			s.logger.Debug("Email already exists, skipping", "emailID", msg.Id)
+			s.logger.Debug("Email already exists in database", "emailID", msg.Id)
+			skippedExistingCount++
 			continue
 		}
 
-		// Get the full message
 		fullMsg, err := s.gmailService.Users.Messages.Get("me", msg.Id).Do()
 		if err != nil {
 			s.logger.Error("Failed to get message", "emailID", msg.Id, "error", err)
@@ -93,22 +111,34 @@ func (s *GmailService) FetchEmails(ctx context.Context) error {
 		}
 
 		messageTime := time.Unix(0, fullMsg.InternalDate*int64(time.Millisecond))
-		if messageTime.Before(fetchFrom) {
-			s.logger.Info("Message is older than poll interval", "messageID", msg.Id, "messageTime", messageTime)
-			// continue
+
+		if hasLastEmail && (messageTime.Before(fetchFrom) || messageTime.Equal(fetchFrom)) {
+			s.logger.Debug("Message timestamp not after last received email time",
+				"messageID", msg.Id,
+				"messageTime", messageTime.Format("2006-01-02 15:04:05 UTC"),
+				"lastReceivedTime", fetchFrom.Format("2006-01-02 15:04:05 UTC"),
+				"difference", fetchFrom.Sub(messageTime).String())
+			skippedOldCount++
+			continue // Actually skip it this time!
 		}
 
-		// Convert to our domain entity
+		// Convert to domain entity
 		email, err := s.convertToEmail(fullMsg)
 		if err != nil {
 			s.logger.Error("Failed to convert message", "emailID", msg.Id, "error", err)
 			continue
 		}
 
+		// Apply subject filter
 		if !s.FilterPattern(email.Subject) {
+			s.logger.Debug("Email doesn't match subject filter", "subject", email.Subject)
 			continue
 		}
-		s.logger.Info("Email subject does match filter", "subject", email.Subject)
+
+		s.logger.Info("Processing new email",
+			"subject", email.Subject,
+			"emailID", email.EmailID,
+			"receivedAt", email.ReceivedAt.Format("2006-01-02 15:04:05 UTC"))
 
 		// Save to repository
 		err = s.emailRepo.Save(ctx, email)
@@ -117,14 +147,14 @@ func (s *GmailService) FetchEmails(ctx context.Context) error {
 			continue
 		}
 
-		s.logger.Info("Email fetched and saved", "emailID", email.EmailID)
 		newEmailsCount++
 	}
 
 	s.logger.Info("Email fetch completed",
-		"totalMessages", len(resp.Messages),
-		"existingEmails", len(existingEmails),
-		"newEmailsSaved", newEmailsCount)
+		"totalFromGmail", len(resp.Messages),
+		"alreadyInDB", skippedExistingCount,
+		"skippedOld", skippedOldCount,
+		"newEmails", newEmailsCount)
 
 	return nil
 }

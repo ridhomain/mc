@@ -379,7 +379,7 @@ func (r *MongoEmailRepository) UpdateProcessStepsByEmailID(ctx context.Context, 
 
 	_, err := r.collection.UpdateOne(
 		ctx,
-		bson.M{"emailID": emailID},
+		bson.M{"emailid": emailID},
 		update,
 	)
 	return err
