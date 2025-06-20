@@ -23,7 +23,7 @@ type FlightProcessorV2 struct {
 	logger           logger.Logger
 }
 
-// NewFlightProcessor creates a new flight processor
+// NewFlightProcessorV2 creates a new flight processor
 func NewFlightProcessorV2(
 	airlineRepo repository.AirlineRepository,
 	timezoneRepo repository.TimezoneRepository,
@@ -46,32 +46,138 @@ func NewFlightProcessorV2(
 
 // ProcessFlightMessage processes flight notification messages
 func (fp *FlightProcessorV2) ProcessFlightMessage(ctx context.Context, body string, emailID string) error {
-	fp.logger.Info("Starting flight message processing")
-	extractedData := make(map[string]interface{})
+	fp.logger.Info("Starting flight message processing", "emailId", emailID)
 
+	// Log a sample of the body for debugging
+	if len(body) > 500 {
+		fp.logger.Debug("Email body sample", "sample", body[:500])
+	} else {
+		fp.logger.Debug("Email body", "body", body)
+	}
+
+	// Mark as PROCESSING
+	err := fp.emailRepo.UpdateStatusByEmailID(ctx, emailID, entity.StatusProcessing, time.Now())
+	if err != nil {
+		fp.logger.Error("Failed to update status to PROCESSING", "error", err)
+		return err
+	}
+
+	// Track processing steps
+	processSteps := entity.ProcessSteps{}
+	extractedData := make(map[string]interface{})
+	var processError error
+
+	// Extract phone list
 	phoneList := fp.emailParser.ExtractPhoneList(body)
+	processSteps.PhonesExtracted = true
 	extractedData["phoneCount"] = len(phoneList)
-	isScheduleChanged := fp.emailParser.IsScheduleChanged(body)
-	extractedData["isScheduleChanged"] = isScheduleChanged
+
+	// Update steps after phone extraction
+	fp.emailRepo.UpdateProcessStepsByEmailID(ctx, emailID, processSteps)
+
+	// Extract PNR
 	pnrList := fp.emailParser.ExtractProviderPnr(body)
 	extractedData["providerPnr"] = pnrList.ProviderPnr
+
+	airlinesPnr := fp.emailParser.ExtractAirlinesPnr(body)
+	extractedData["airlinesPnr"] = airlinesPnr.AirlinesPnr
+
+	// Extract passengers
 	passengerList := fp.emailParser.ExtractPassengerLastnameList(body)
 	extractedData["passengers"] = passengerList
 
 	msgPhoneList := fp.emailParser.FormatPhoneList(phoneList)
-	schedules := fp.emailParser.ExtractSchedule(ctx, body)
-	extractedData["scheduleCount"] = len(schedules)
 
-	var processError error
+	// Extract schedules - parser will handle old vs new
+	scheduleData := fp.emailParser.ExtractScheduleWithChanges(ctx, body)
+	schedules := scheduleData.NewSchedules
+	changedSegments := scheduleData.ChangedSegments
+
+	processSteps.SchedulesParsed = true
+	extractedData["scheduleCount"] = len(schedules)
+	extractedData["hasOldSchedules"] = scheduleData.HasOldSchedules
+	extractedData["changedSegments"] = changedSegments
+
+	// Update steps after schedule parsing
+	fp.emailRepo.UpdateProcessStepsByEmailID(ctx, emailID, processSteps)
+
+	// Check if this is first time booking
+	isFirstTimeBooking := false
+	if fp.flightRecordRepo != nil && len(phoneList) > 0 && len(schedules) > 0 {
+		testKey := fp.createBookingKey(phoneList[0].Name, pnrList.ProviderPnr, schedules[0].SegNo)
+		_, err := fp.flightRecordRepo.FindByBookingKey(ctx, testKey)
+		if err != nil {
+			isFirstTimeBooking = true
+		}
+	}
+
+	// Calculate total messages to send
+	totalMessages := 0
+	for range phoneList {
+		for i, schedule := range schedules {
+			if changedSegments[schedule.SegNo] {
+				// Schedule change - only reminder
+				totalMessages += 1
+			} else if isFirstTimeBooking && i == 0 {
+				// First time booking, first segment - welcome + reminder
+				totalMessages += 2
+			} else if isFirstTimeBooking {
+				// First time booking, other segments - only reminder
+				totalMessages += 1
+			}
+			// If not first time and no change, no messages needed
+		}
+	}
+	processSteps.TotalMessages = totalMessages
+
+	// Process each phone and schedule combination
+	messagesQueued := 0
+	var messages []map[string]interface{}
+	flightRecordsCreated := 0
 
 	for _, phoneInfo := range phoneList {
 		fp.logger.Info("Processing phone", "phone", phoneInfo.Phone, "name", phoneInfo.Name)
-		segmentDetails := fp.emailParser.FormatSegments(schedules)
 
-		var prevArrivalDateTime time.Time
+		for segmentIdx, schedule := range schedules {
+			// Create booking key with segment number
+			bookingKey := fp.createBookingKey(phoneInfo.Name, pnrList.ProviderPnr, schedule.SegNo)
 
-		for i, schedule := range schedules {
-			fp.logger.Info("Processing schedule", schedule.DepartDateTime.String(), "segment", i)
+			// Check if this segment has changed
+			isScheduleChanged := changedSegments[schedule.SegNo]
+
+			// Always update or create flight record
+			flightRecord := &entity.FlightRecord{
+				BookingKey:        bookingKey,
+				ProviderPNR:       pnrList.ProviderPnr,
+				AirlinesPNR:       airlinesPnr.AirlinesPnr,
+				PassengerName:     phoneInfo.Name,
+				PhoneNumber:       phoneInfo.Phone,
+				FlightNumber:      schedule.FlightNo,
+				DepartureUTC:      schedule.DepartDateTime,
+				ArrivalUTC:        schedule.ArriveDateTime,
+				DepartureAirport:  schedule.From,
+				ArrivalAirport:    schedule.To,
+				IsScheduleChanged: isScheduleChanged,
+			}
+
+			// If this is a change, get the existing record for old departure time
+			var existingRecord *entity.FlightRecord
+			if isScheduleChanged && fp.flightRecordRepo != nil {
+				existingRecord, _ = fp.flightRecordRepo.FindByBookingKey(ctx, bookingKey)
+				if existingRecord != nil {
+					flightRecord.OldDepartureUTC = &existingRecord.DepartureUTC
+				}
+			}
+
+			if fp.flightRecordRepo != nil {
+				if err := fp.flightRecordRepo.Upsert(ctx, flightRecord); err != nil {
+					fp.logger.Error("Failed to save flight record", "error", err)
+				} else {
+					flightRecordsCreated++
+				}
+			}
+
+			// Prepare message
 			msg, location, arrivalLocation, err := fp.prepareMessageAndLocations(ctx, schedule, phoneInfo.Name, msgPhoneList)
 			if err != nil {
 				fp.logger.Error("Failed to prepare message", "error", err)
@@ -84,34 +190,150 @@ func (fp *FlightProcessorV2) ProcessFlightMessage(ctx context.Context, body stri
 				continue
 			}
 
-			if isScheduleChanged {
-				fp.handleScheduleChange(i, msg, schedule, phoneInfo, pnrList.ProviderPnr, passengerList)
+			var messageData map[string]interface{}
 
+			if isScheduleChanged {
+				fp.logger.Info("Processing schedule change", "segment", segmentIdx, "segNo", schedule.SegNo)
+				messageData = fp.handleScheduleChange(segmentIdx, msg, schedule, phoneInfo, pnrList.ProviderPnr, passengerList, bookingKey, existingRecord)
+				if messageData != nil {
+					messagesQueued++
+				}
+			} else if isFirstTimeBooking {
+				fp.logger.Info("Processing first time booking", "segment", segmentIdx)
+				segmentDetails := fp.emailParser.FormatSegments(schedules)
+
+				// For first segment, send immediate welcome message
+				if segmentIdx == 0 {
+					welcomeMsg := fmt.Sprintf(utils.MSG_TEMPLATE_1ST,
+						phoneInfo.Name,
+						msgPhoneList,
+						segmentDetails,
+					)
+
+					// Send immediate welcome message
+					immediatePayload := &entity.Payload{
+						Text:       welcomeMsg,
+						Phone:      phoneInfo.Phone,
+						Type:       entity.FlightNotification,
+						ScheduleAt: time.Now().Add(2 * time.Second),
+						CreatedAt:  time.Now(),
+						Status:     "pending",
+						Metadata: map[string]interface{}{
+							"bookingKey":   bookingKey,
+							"providerPnr":  pnrList.ProviderPnr,
+							"segmentIndex": segmentIdx,
+							"messageType":  "welcome",
+						},
+					}
+					immediatePayload.SetImageURL(utils.IMAGE_WA_NOTIF)
+
+					welcomeTaskID, err := fp.whatsappRepo.SendPayload(ctx, immediatePayload)
+					if err != nil {
+						fp.logger.Error("Failed to send immediate message", "error", err)
+					} else {
+						fp.logger.Info("Sent welcome message", "taskId", welcomeTaskID, "phone", phoneInfo.Phone)
+						messagesQueued++
+					}
+				}
+
+				// Schedule reminder for all segments
+				if !fp.isFlightInPast(schedule.DepartDateTime) {
+					scheduledAt := schedule.DepartDateTime.Add(-24 * time.Hour)
+					if scheduledAt.Before(time.Now()) {
+						scheduledAt = time.Now().Add(10 * time.Second)
+					}
+
+					reminderPayload := &entity.Payload{
+						Text:       msg,
+						Phone:      phoneInfo.Phone,
+						Type:       entity.FlightNotification,
+						ScheduleAt: scheduledAt,
+						CreatedAt:  time.Now(),
+						Status:     "pending",
+						Metadata: map[string]interface{}{
+							"bookingKey":   bookingKey,
+							"providerPnr":  pnrList.ProviderPnr,
+							"segmentIndex": segmentIdx,
+							"messageType":  "reminder",
+						},
+					}
+					reminderPayload.SetImageURL(fp.getRotatingImage(segmentIdx))
+
+					reminderTaskID, err := fp.whatsappRepo.SendPayload(ctx, reminderPayload)
+					if err != nil {
+						fp.logger.Error("Failed to schedule reminder", "error", err)
+					} else {
+						fp.logger.Info("Scheduled reminder", "taskId", reminderTaskID, "scheduledAt", scheduledAt)
+						messagesQueued++
+
+						// Update flight record with task ID
+						if fp.flightRecordRepo != nil {
+							fp.flightRecordRepo.UpdateTaskInfo(ctx, bookingKey, reminderTaskID, scheduledAt)
+						}
+					}
+				}
+
+				messageData = map[string]interface{}{
+					"segment_index": segmentIdx,
+					"phone":         phoneInfo.Phone,
+					"name":          phoneInfo.Name,
+					"booking_key":   bookingKey,
+				}
 			} else {
-				fp.logger.Info("Processing regular schedule", "segment", i)
-				fp.handleRegularSchedule(i, phoneInfo, msg, schedule.DepartDateTime, prevArrivalDateTime, segmentDetails, pnrList.ProviderPnr, passengerList, schedule, msgPhoneList)
+				// Not first time and no change - just update the record, no messages
+				fp.logger.Info("No action needed - existing booking with no changes",
+					"segment", segmentIdx,
+					"phone", phoneInfo.Phone)
 			}
 
-			prevArrivalDateTime = schedule.ArriveDateTime
+			if messageData != nil {
+				messages = append(messages, messageData)
+			}
+
+			// Update progress
+			processSteps.MessagesQueued = messagesQueued
+			fp.emailRepo.UpdateProcessStepsByEmailID(ctx, emailID, processSteps)
 		}
 	}
 
-	// Mark email as processed with metadata
-	status := "processed"
+	// Determine final status
+	finalStatus := entity.StatusCompleted
 	errorDetail := ""
+
 	if processError != nil {
-		status = "failed"
-		errorDetail = processError.Error()
+		if messagesQueued == 0 {
+			finalStatus = entity.StatusFailed
+		} else {
+			finalStatus = entity.StatusCompleted // Partial success
+			errorDetail = fmt.Sprintf("Partially completed: %d/%d messages sent. Error: %v",
+				messagesQueued, totalMessages, processError)
+		}
+	} else if len(phoneList) == 0 || len(schedules) == 0 {
+		finalStatus = entity.StatusSkipped
+		errorDetail = "No valid phone numbers or schedules found"
 	}
 
-	err := fp.emailRepo.MarkAsProcessedByEmailID(ctx, emailID, status, "flight", errorDetail, extractedData)
+	// Mark email as processed with final status
+	extractedData["messagesQueued"] = messagesQueued
+	extractedData["totalMessages"] = totalMessages
+	extractedData["flightRecordsCreated"] = flightRecordsCreated
+	extractedData["expectedFlightRecords"] = len(phoneList) * len(schedules)
+
+	err = fp.emailRepo.MarkAsProcessedByEmailID(ctx, emailID, finalStatus, "flight", errorDetail, extractedData)
 	if err != nil {
-		fp.logger.Error("Failed to mark email as processed", "emailID", emailID, "error", err)
-	} else {
-		fp.logger.Info("Email marked as processed", "emailID", emailID, "status", status)
+		fp.logger.Error("Failed to mark email as processed", "error", err)
+		return err
 	}
 
-	return nil
+	fp.logger.Info("Flight message processing completed",
+		"emailId", emailID,
+		"status", finalStatus,
+		"messagesQueued", messagesQueued,
+		"totalMessages", totalMessages,
+		"flightRecordsCreated", flightRecordsCreated,
+		"changedSegmentsCount", len(changedSegments))
+
+	return processError
 }
 
 // prepareMessageAndLocations prepares message and location data
@@ -170,74 +392,56 @@ func (fp *FlightProcessorV2) prepareMessageAndLocations(ctx context.Context, sch
 	return msg, location, arrivalLocation, nil
 }
 
-// handleRegularSchedule handles regular flight schedule processing
-func (fp *FlightProcessorV2) handleRegularSchedule(i int, phoneInfo utils.PhoneInfo, msg string, departDateTime time.Time, prevArrivalDateTime time.Time, segmentDetails string, providerPnr string, passengerList string, schedule utils.FlightSchedule, msgPhoneList string) map[string]interface{} {
-	dateTimeNow := time.Now()
-
-	// Check if flight is in the past
-	pastDate := departDateTime.Before(dateTimeNow) && prevArrivalDateTime.Before(dateTimeNow)
-
-	messageData := map[string]interface{}{
-		"segment_index":  i,
-		"phone":          phoneInfo.Phone,
-		"name":           phoneInfo.Name,
-		"message":        msg,
-		"depart_time":    departDateTime,
-		"provider_pnr":   providerPnr,
-		"passenger_list": passengerList,
-		"segment_number": schedule.SegNo,
-		"status":         schedule.Status,
-		"phone_list":     msgPhoneList,
-		"past_date":      pastDate,
-	}
-
-	if i == 0 {
-		// First segment - send immediate notification with segment details
-		msgWithSegment := fmt.Sprintf("%s\n\nSegment Details:\n%s", msg, segmentDetails)
-		messageData["message_with_segments"] = msgWithSegment
-		messageData["immediate_send"] = true
-		messageData["scheduled_time"] = time.Now().Add(2 * time.Second)
-
-		if !pastDate {
-			// Schedule 24 hours before departure
-			scheduledAt := departDateTime.Add(-24 * time.Hour)
-			if scheduledAt.Before(time.Now()) {
-				messageData["reminder_time"] = time.Now().Add(10 * time.Second)
-			} else {
-				messageData["reminder_time"] = scheduledAt
-			}
-		}
-	} else {
-		if !pastDate {
-			scheduledAt := departDateTime.Add(-24 * time.Hour)
-			if scheduledAt.Before(time.Now()) {
-				messageData["scheduled_time"] = time.Now().Add(10 * time.Second)
-			} else {
-				messageData["scheduled_time"] = scheduledAt
-			}
-		}
-	}
-
-	scheduledAt := schedule.DepartDateTime.Add(-24 * time.Hour)
-	daisiPayload := &entity.Payload{
-		Text:       msg,
-		Phone:      phoneInfo.Phone,
-		Type:       entity.FlightNotification,
-		ScheduleAt: scheduledAt,
-		CreatedAt:  time.Now(),
-		SentAt:     time.Time{},
-		Status:     "pending",
-	}
-	fp.whatsappRepo.SendPayload(context.Background(), daisiPayload)
-	fp.logger.Info("Regular schedule processed", "segment", i, "phone", phoneInfo.Phone)
-	return messageData
-}
-
 // handleScheduleChange handles flight schedule changes
-func (fp *FlightProcessorV2) handleScheduleChange(i int, msg string, schedule utils.FlightSchedule, phoneInfo utils.PhoneInfo, providerPnr string, passengerList string) map[string]interface{} {
+func (fp *FlightProcessorV2) handleScheduleChange(
+	i int,
+	msg string,
+	schedule utils.FlightSchedule,
+	phoneInfo utils.PhoneInfo,
+	providerPnr string,
+	passengerList string,
+	bookingKey string,
+	existingRecord *entity.FlightRecord,
+) map[string]interface{} {
 	if schedule.Status != "HK" {
-		scheduledAt := schedule.DepartDateTime.Add(-24 * time.Hour)
+		fp.logger.Info("Skipping cancelled flight segment", "status", schedule.Status, "segment", i)
+		return nil
+	}
 
+	newScheduledTime := schedule.DepartDateTime.Add(-24 * time.Hour)
+	if newScheduledTime.Before(time.Now()) {
+		newScheduledTime = time.Now().Add(10 * time.Second)
+	}
+
+	// Try to reschedule existing task if available
+	rescheduled := false
+	if existingRecord != nil && existingRecord.LastTaskID != "" {
+		// Reschedule the existing task
+		err := fp.whatsappRepo.RescheduleTask(
+			context.Background(),
+			existingRecord.LastTaskID,
+			newScheduledTime,
+			fmt.Sprintf("Flight schedule changed from %s to %s",
+				existingRecord.DepartureUTC.Format("15:04"),
+				schedule.DepartDateTime.Format("15:04")),
+		)
+
+		if err != nil {
+			fp.logger.Error("Failed to reschedule task", "taskId", existingRecord.LastTaskID, "error", err)
+		} else {
+			fp.logger.Info("Rescheduled existing task",
+				"taskId", existingRecord.LastTaskID,
+				"oldTime", existingRecord.DepartureUTC,
+				"newTime", schedule.DepartDateTime)
+			rescheduled = true
+
+			// Update flight record with new schedule
+			fp.flightRecordRepo.UpdateTaskInfo(context.Background(), bookingKey, existingRecord.LastTaskID, newScheduledTime)
+		}
+	}
+
+	// If reschedule failed or no existing task, create new one
+	if !rescheduled {
 		messageData := map[string]interface{}{
 			"segment_index":  i,
 			"phone":          phoneInfo.Phone,
@@ -247,29 +451,81 @@ func (fp *FlightProcessorV2) handleScheduleChange(i int, msg string, schedule ut
 			"passenger_list": passengerList,
 			"segment_number": schedule.SegNo,
 			"status":         schedule.Status,
-			"scheduled_time": scheduledAt,
+			"scheduled_time": newScheduledTime,
 			"change_type":    "schedule_change",
+			"booking_key":    bookingKey,
 		}
 
-		fp.logger.Info("Schedule change processed", "segment", i, "phone", phoneInfo.Phone, "status", schedule.Status)
-
-		daisiPayload := &entity.Payload{
+		payload := &entity.Payload{
 			Text:       msg,
 			Phone:      phoneInfo.Phone,
 			Type:       entity.FlightNotification,
-			ScheduleAt: scheduledAt,
+			ScheduleAt: newScheduledTime,
 			CreatedAt:  time.Now(),
-			SentAt:     time.Time{},
 			Status:     "pending",
+			Metadata: map[string]interface{}{
+				"bookingKey":     bookingKey,
+				"providerPnr":    providerPnr,
+				"segmentIndex":   i,
+				"messageType":    "schedule_change",
+				"scheduleStatus": schedule.Status,
+			},
 		}
-		fp.whatsappRepo.SendPayload(context.Background(), daisiPayload)
+		// Set image using the new structure
+		payload.SetImageURL(utils.IMAGE_CHANGE)
+
+		taskID, err := fp.whatsappRepo.SendPayload(context.Background(), payload)
+		if err != nil {
+			fp.logger.Error("Failed to send schedule change", "error", err)
+		} else {
+			fp.logger.Info("New schedule change task created", "taskId", taskID)
+			messageData["task_id"] = taskID
+
+			if fp.flightRecordRepo != nil {
+				fp.flightRecordRepo.UpdateTaskInfo(context.Background(), bookingKey, taskID, newScheduledTime)
+			}
+		}
+
 		return messageData
 	}
 
-	return nil
+	return map[string]interface{}{
+		"rescheduled":   true,
+		"booking_key":   bookingKey,
+		"segment_index": i,
+	}
 }
 
+// createBookingKey creates a unique key with segment number
+func (fp *FlightProcessorV2) createBookingKey(passengerName, providerPnr string, segmentNumber int) string {
+	normalized := strings.ToUpper(strings.TrimSpace(passengerName))
+	return fmt.Sprintf("%s:%s:%d", normalized, strings.ToUpper(providerPnr), segmentNumber)
+}
+
+// getRotatingImage returns a rotating image based on index
+func (fp *FlightProcessorV2) getRotatingImage(index int) string {
+	images := []string{
+		utils.IMAGES_ADS_MAIN_1,
+		utils.IMAGES_ADS_MAIN_2,
+		utils.IMAGES_ADS_MAIN_3,
+		utils.IMAGES_ADS_MAIN_4,
+		utils.IMAGES_ADS_MAIN_5,
+	}
+	return images[index%len(images)]
+}
+
+// isFlightInPast checks if flight has already departed
+func (fp *FlightProcessorV2) isFlightInPast(departTime time.Time) bool {
+	return departTime.Before(time.Now())
+}
+
+// ProcessPendingEmails processes unprocessed emails with safety checks
 func (fp *FlightProcessorV2) ProcessPendingEmails(ctx context.Context) error {
+	// First, reset any stale processing emails
+	if err := fp.emailRepo.ResetProcessingEmails(ctx); err != nil {
+		fp.logger.Error("Failed to reset stale processing emails", "error", err)
+	}
+
 	emails, err := fp.emailRepo.FindUnprocessed(ctx, 100)
 	if err != nil {
 		fp.logger.Error("Failed to get unprocessed emails", "error", err)
@@ -278,13 +534,29 @@ func (fp *FlightProcessorV2) ProcessPendingEmails(ctx context.Context) error {
 
 	fp.logger.Info("Found unprocessed emails", "count", len(emails))
 
+	successCount := 0
+	failCount := 0
+
 	for _, email := range emails {
-		err := fp.ProcessFlightMessage(ctx, email.HTMLBody, email.ID)
+		// Use HTML body if available, otherwise fall back to plain text
+		body := email.HTMLBody
+		if body == "" {
+			body = email.Body
+		}
+
+		err := fp.ProcessFlightMessage(ctx, body, email.EmailID)
 		if err != nil {
-			fp.logger.Error("Failed to process email", "emailID", email.ID, "error", err)
-			// Continue with the next email
+			fp.logger.Error("Failed to process email", "emailID", email.EmailID, "error", err)
+			failCount++
+		} else {
+			successCount++
 		}
 	}
+
+	fp.logger.Info("Email processing batch completed",
+		"total", len(emails),
+		"success", successCount,
+		"failed", failCount)
 
 	return nil
 }
