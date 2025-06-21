@@ -271,35 +271,35 @@ func (p *EmailParser) ExtractPassengerLastnameList(body string) string {
 }
 
 // HasMatchingPassenger checks if any passenger from listDb exists in listParam
-func (p *EmailParser) HasMatchingPassenger(listDb, listParam string) bool {
-	passengersA := strings.Split(listDb, ",")
-	passengersB := strings.Split(listParam, ",")
+// func (p *EmailParser) HasMatchingPassenger(listDb, listParam string) bool {
+// 	passengersA := strings.Split(listDb, ",")
+// 	passengersB := strings.Split(listParam, ",")
 
-	// Normalize and trim each entry
-	normalize := func(list []string) []string {
-		var result []string
-		for _, passenger := range list {
-			result = append(result, strings.TrimSpace(passenger))
-		}
-		return result
-	}
+// 	// Normalize and trim each entry
+// 	normalize := func(list []string) []string {
+// 		var result []string
+// 		for _, passenger := range list {
+// 			result = append(result, strings.TrimSpace(passenger))
+// 		}
+// 		return result
+// 	}
 
-	passengersA = normalize(passengersA)
-	passengersB = normalize(passengersB)
+// 	passengersA = normalize(passengersA)
+// 	passengersB = normalize(passengersB)
 
-	// Check if any passenger in A exists in B
-	for _, a := range passengersA {
-		for _, b := range passengersB {
-			if a == b {
-				p.logger.Info("Matching passenger found", "passenger", a)
-				return true
-			}
-		}
-	}
+// 	// Check if any passenger in A exists in B
+// 	for _, a := range passengersA {
+// 		for _, b := range passengersB {
+// 			if a == b {
+// 				p.logger.Info("Matching passenger found", "passenger", a)
+// 				return true
+// 			}
+// 		}
+// 	}
 
-	p.logger.Info("No matching passengers found")
-	return false
-}
+// 	p.logger.Info("No matching passengers found")
+// 	return false
+// }
 
 // FormatPhoneList formats phone list for display
 func (p *EmailParser) FormatPhoneList(phoneList []PhoneInfo) string {
