@@ -48,13 +48,6 @@ func NewFlightProcessorV2(
 func (fp *FlightProcessorV2) ProcessFlightMessage(ctx context.Context, body string, emailID string) error {
 	fp.logger.Info("Starting flight message processing", "emailId", emailID)
 
-	// Log a sample of the body for debugging
-	if len(body) > 500 {
-		fp.logger.Debug("Email body sample", "sample", body[:500])
-	} else {
-		fp.logger.Debug("Email body", "body", body)
-	}
-
 	// Mark as PROCESSING
 	err := fp.emailRepo.UpdateStatusByEmailID(ctx, emailID, entity.StatusProcessing, time.Now())
 	if err != nil {
@@ -67,7 +60,7 @@ func (fp *FlightProcessorV2) ProcessFlightMessage(ctx context.Context, body stri
 	extractedData := make(map[string]interface{})
 	var processError error
 
-	// Extract phone list - now contains complete passenger names
+	// Extract phone list
 	phoneList := fp.emailParser.ExtractPhoneList(body)
 	processSteps.PhonesExtracted = true
 	extractedData["phoneCount"] = len(phoneList)
@@ -139,19 +132,6 @@ func (fp *FlightProcessorV2) ProcessFlightMessage(ctx context.Context, body stri
 				"segmentHasChanged", segmentHasChanged,
 				"bookingKey", bookingKey)
 
-			// Prepare message
-			msg, location, arrivalLocation, err := fp.prepareMessageAndLocations(ctx, schedule, phoneInfo.Name, passengerList)
-			if err != nil {
-				fp.logger.Error("Failed to prepare message", "error", err)
-				processError = err
-				continue
-			}
-
-			if location == nil || arrivalLocation == nil {
-				fp.logger.Warn("Skipping schedule due to missing location info")
-				continue
-			}
-
 			// Process based on booking status and changes
 			if isFirstBooking {
 				// FIRST BOOKING - Send welcome + schedule reminder
@@ -166,8 +146,9 @@ func (fp *FlightProcessorV2) ProcessFlightMessage(ctx context.Context, body stri
 
 				// Send welcome message for first segment only
 				if segmentIdx == 0 {
-					if err := fp.sendWelcomeMessage(ctx, phoneInfo, schedules, passengerList, bookingKey, pnrList.ProviderPnr); err != nil {
+					if err := fp.sendWelcomeMessage(ctx, phoneInfo, schedules, phoneList, bookingKey, pnrList.ProviderPnr); err != nil {
 						fp.logger.Error("Failed to send welcome message", "error", err)
+						processError = err
 					} else {
 						messagesQueued++
 					}
@@ -175,8 +156,9 @@ func (fp *FlightProcessorV2) ProcessFlightMessage(ctx context.Context, body stri
 
 				// Schedule reminder for all segments if not in past
 				if !fp.isFlightInPast(schedule.DepartDateTime) {
-					if err := fp.scheduleReminder(ctx, phoneInfo, msg, schedule, bookingKey, pnrList.ProviderPnr, segmentIdx); err != nil {
+					if err := fp.scheduleReminder(ctx, phoneInfo, schedule, bookingKey, pnrList.ProviderPnr, segmentIdx, phoneList); err != nil {
 						fp.logger.Error("Failed to schedule reminder", "error", err)
+						processError = err
 					} else {
 						messagesQueued++
 					}
@@ -187,8 +169,9 @@ func (fp *FlightProcessorV2) ProcessFlightMessage(ctx context.Context, body stri
 				fp.logger.Info("Processing schedule change", "segment", schedule.SegNo)
 				totalMessages += 1
 
-				if err := fp.handleScheduleChange(ctx, phoneInfo, msg, schedule, bookingKey, pnrList.ProviderPnr, existingRecord); err != nil {
+				if err := fp.handleScheduleChange(ctx, phoneInfo, schedule, bookingKey, pnrList.ProviderPnr, existingRecord, phoneList); err != nil {
 					fp.logger.Error("Failed to handle schedule change", "error", err)
+					processError = err
 				} else {
 					messagesQueued++
 				}
@@ -273,7 +256,7 @@ func (fp *FlightProcessorV2) ProcessFlightMessage(ctx context.Context, body stri
 }
 
 // prepareMessageAndLocations prepares message and location data
-func (fp *FlightProcessorV2) prepareMessageAndLocations(ctx context.Context, schedule utils.FlightSchedule, name string, msgPhoneList string) (string, *time.Location, *time.Location, error) {
+func (fp *FlightProcessorV2) prepareMessageAndLocations(ctx context.Context, schedule utils.FlightSchedule, currentPassenger utils.PhoneInfo, phoneList []utils.PhoneInfo) (string, *time.Location, *time.Location, error) {
 	departFormatted := schedule.DepartDateTime.Format("2006-01-02 15:04:05")
 	arriveFormatted := schedule.ArriveDateTime.Format("2006-01-02 15:04:05")
 
@@ -314,9 +297,12 @@ func (fp *FlightProcessorV2) prepareMessageAndLocations(ctx context.Context, sch
 		return "", nil, nil, err
 	}
 
+	// Format phone list with all passengers
+	phoneListFormatted := fp.emailParser.FormatPhoneList(phoneList)
+
 	msg := fmt.Sprintf(utils.MSG_TEMPLATE,
-		name,
-		msgPhoneList,
+		currentPassenger.Name, // Dear [CURRENT PASSENGER NAME]
+		phoneListFormatted,    // All passengers with phone numbers
 		airlineEntity.Name,
 		schedule.FlightNo,
 		schedule.From, fmt.Sprintf("%s | %s", fromAirport.AirportName, fromAirport.CityName),
@@ -335,12 +321,15 @@ func (fp *FlightProcessorV2) createBookingKey(passengerName, providerPnr string,
 }
 
 // sendWelcomeMessage sends the initial welcome message for first-time bookings
-func (fp *FlightProcessorV2) sendWelcomeMessage(ctx context.Context, phoneInfo utils.PhoneInfo, schedules []utils.FlightSchedule, passengerList string, bookingKey string, providerPnr string) error {
+func (fp *FlightProcessorV2) sendWelcomeMessage(ctx context.Context, phoneInfo utils.PhoneInfo, schedules []utils.FlightSchedule, phoneList []utils.PhoneInfo, bookingKey string, providerPnr string) error {
 	segmentDetails := fp.emailParser.FormatSegments(schedules)
 
+	// Format phone list with all passengers
+	phoneListFormatted := fp.emailParser.FormatPhoneList(phoneList)
+
 	welcomeMsg := fmt.Sprintf(utils.MSG_TEMPLATE_1ST,
-		phoneInfo.Name,
-		passengerList,
+		phoneInfo.Name,     // Dear [CURRENT PASSENGER NAME]
+		phoneListFormatted, // All passengers with phone numbers
 		segmentDetails,
 	)
 
@@ -369,7 +358,13 @@ func (fp *FlightProcessorV2) sendWelcomeMessage(ctx context.Context, phoneInfo u
 }
 
 // scheduleReminder schedules a reminder message 24 hours before departure
-func (fp *FlightProcessorV2) scheduleReminder(ctx context.Context, phoneInfo utils.PhoneInfo, msg string, schedule utils.FlightSchedule, bookingKey string, providerPnr string, segmentIdx int) error {
+func (fp *FlightProcessorV2) scheduleReminder(ctx context.Context, phoneInfo utils.PhoneInfo, schedule utils.FlightSchedule, bookingKey string, providerPnr string, segmentIdx int, phoneList []utils.PhoneInfo) error {
+	// Prepare the message
+	msg, _, _, err := fp.prepareMessageAndLocations(ctx, schedule, phoneInfo, phoneList)
+	if err != nil {
+		return err
+	}
+
 	scheduledAt := schedule.DepartDateTime.Add(-24 * time.Hour)
 	if scheduledAt.Before(time.Now()) {
 		scheduledAt = time.Now().Add(10 * time.Second)
@@ -407,11 +402,17 @@ func (fp *FlightProcessorV2) scheduleReminder(ctx context.Context, phoneInfo uti
 }
 
 // handleScheduleChange handles flight schedule changes
-func (fp *FlightProcessorV2) handleScheduleChange(ctx context.Context, phoneInfo utils.PhoneInfo, msg string, schedule utils.FlightSchedule, bookingKey string, providerPnr string, existingRecord *entity.FlightRecord) error {
+func (fp *FlightProcessorV2) handleScheduleChange(ctx context.Context, phoneInfo utils.PhoneInfo, schedule utils.FlightSchedule, bookingKey string, providerPnr string, existingRecord *entity.FlightRecord, phoneList []utils.PhoneInfo) error {
 	// Skip cancelled flights
 	if schedule.Status != "HK" {
 		fp.logger.Info("Skipping cancelled flight segment", "status", schedule.Status, "segment", schedule.SegNo)
 		return nil
+	}
+
+	// Prepare the message
+	msg, _, _, err := fp.prepareMessageAndLocations(ctx, schedule, phoneInfo, phoneList)
+	if err != nil {
+		return err
 	}
 
 	newScheduledTime := schedule.DepartDateTime.Add(-24 * time.Hour)

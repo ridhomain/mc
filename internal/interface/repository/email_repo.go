@@ -1,4 +1,4 @@
-// internal/interface/repository/mongodb_repo.go
+// internal/interface/repository/email_repo.go
 package repository
 
 import (
@@ -10,7 +10,6 @@ import (
 	"mailcast-service-v2/internal/domain/repository"
 
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
@@ -27,7 +26,6 @@ func NewMongoEmailRepository(db *mongo.Database) repository.EmailRepository {
 	// Create indexes for better performance
 	ctx := context.Background()
 
-	// Index on emailId for fast lookups and uniqueness
 	emailIDIndex := mongo.IndexModel{
 		Keys:    bson.M{"emailId": 1},
 		Options: options.Index().SetUnique(true),
@@ -66,10 +64,6 @@ func NewMongoEmailRepository(db *mongo.Database) repository.EmailRepository {
 
 // Save saves an email to MongoDB
 func (r *MongoEmailRepository) Save(ctx context.Context, email *entity.Email) error {
-	if email.ID == "" {
-		email.ID = primitive.NewObjectID().Hex()
-	}
-
 	if email.ProcessStatus == "" {
 		email.ProcessStatus = entity.StatusPending
 	}
@@ -80,13 +74,8 @@ func (r *MongoEmailRepository) Save(ctx context.Context, email *entity.Email) er
 
 // FindByID finds an email by ID
 func (r *MongoEmailRepository) FindByID(ctx context.Context, id string) (*entity.Email, error) {
-	objectID, err := primitive.ObjectIDFromHex(id)
-	if err != nil {
-		return nil, err
-	}
-
 	var email entity.Email
-	err = r.collection.FindOne(ctx, bson.M{"_id": objectID}).Decode(&email)
+	err := r.collection.FindOne(ctx, bson.M{"_id": id}).Decode(&email)
 	if err != nil {
 		return nil, err
 	}
@@ -123,11 +112,6 @@ func (r *MongoEmailRepository) FindUnprocessed(ctx context.Context, limit int) (
 
 // UpdateStatus updates just the status and started time
 func (r *MongoEmailRepository) UpdateStatus(ctx context.Context, id string, status string, startedAt time.Time) error {
-	objectID, err := primitive.ObjectIDFromHex(id)
-	if err != nil {
-		return err
-	}
-
 	update := bson.M{
 		"$set": bson.M{
 			"processStatus": status,
@@ -141,7 +125,7 @@ func (r *MongoEmailRepository) UpdateStatus(ctx context.Context, id string, stat
 
 	result, err := r.collection.UpdateOne(
 		ctx,
-		bson.M{"_id": objectID},
+		bson.M{"_id": id},
 		update,
 	)
 
@@ -158,32 +142,23 @@ func (r *MongoEmailRepository) UpdateStatus(ctx context.Context, id string, stat
 
 // UpdateProcessSteps updates the processing steps
 func (r *MongoEmailRepository) UpdateProcessSteps(ctx context.Context, id string, steps entity.ProcessSteps) error {
-	objectID, err := primitive.ObjectIDFromHex(id)
-	if err != nil {
-		return err
-	}
-
 	update := bson.M{
 		"$set": bson.M{
 			"processSteps": steps,
 		},
 	}
 
-	_, err = r.collection.UpdateOne(
+	res, err := r.collection.UpdateOne(
 		ctx,
-		bson.M{"_id": objectID},
+		bson.M{"id": id},
 		update,
 	)
+	fmt.Printf("Update result: %v\n", res)
 	return err
 }
 
 // MarkAsProcessed marks an email as processed with full details
 func (r *MongoEmailRepository) MarkAsProcessed(ctx context.Context, id, status, processorType, errorDetail string, extractedData map[string]interface{}) error {
-	objectID, err := primitive.ObjectIDFromHex(id)
-	if err != nil {
-		return err
-	}
-
 	update := bson.M{
 		"$set": bson.M{
 			"processedAt":   time.Now(),
@@ -202,7 +177,7 @@ func (r *MongoEmailRepository) MarkAsProcessed(ctx context.Context, id, status, 
 
 	result, err := r.collection.UpdateOne(
 		ctx,
-		bson.M{"_id": objectID},
+		bson.M{"_id": id},
 		update,
 	)
 

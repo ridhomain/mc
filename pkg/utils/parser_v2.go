@@ -54,24 +54,107 @@ func (p *EmailParserV2) cleanHTMLText(text string) string {
 	return cleaned
 }
 
-// ExtractPhoneList extracts phone information from email body
+// ExtractPhoneList extracts phone information from email body with complete names
 func (p *EmailParserV2) ExtractPhoneList(body string) []PhoneInfo {
-	// First, extract the complete passenger list
-	completePassengers := p.ExtractCompletePassengerList(body)
-	passengerMap := p.buildPassengerMap(completePassengers)
+	p.logger.Info("Starting ExtractPhoneList")
 
 	// Clean HTML first
 	cleanBody := p.cleanHTMLText(body)
 
+	// Extract last names and first names separately
+	lastNames := p.extractLastNames(cleanBody)
+	firstNames := p.extractFirstNames(cleanBody)
+
+	p.logger.Debug("Extracted name components",
+		"lastNamesCount", len(lastNames),
+		"firstNamesCount", len(firstNames),
+		"lastNames", lastNames,
+		"firstNames", firstNames)
+
+	// Extract phones from phone list section
+	phones := p.extractPhones(cleanBody)
+
+	p.logger.Debug("Extracted phones",
+		"phonesCount", len(phones),
+		"phones", phones)
+
+	// Combine using index-based matching
+	var phoneList []PhoneInfo
+
+	// The number of entries should be consistent across all lists
+	maxLen := len(phones)
+	if len(lastNames) < maxLen {
+		maxLen = len(lastNames)
+	}
+	if len(firstNames) < maxLen {
+		maxLen = len(firstNames)
+	}
+
+	p.logger.Info("Processing phone list with index matching", "maxLen", maxLen)
+
+	for i := 0; i < maxLen; i++ {
+		var phone, lastName, firstName string
+
+		if i < len(phones) {
+			phone = phones[i]
+		}
+		if i < len(lastNames) {
+			lastName = lastNames[i]
+		}
+		if i < len(firstNames) {
+			firstName = firstNames[i]
+		}
+
+		// Skip if no phone number
+		if phone == "" {
+			p.logger.Warn("Skipping entry - no phone", "index", i)
+			continue
+		}
+
+		// Construct full name in format: LASTNAME/FIRSTNAME TITLE
+		fullName := ""
+		if lastName != "" && firstName != "" {
+			fullName = fmt.Sprintf("%s/%s", lastName, firstName)
+		} else if lastName != "" {
+			fullName = lastName
+		} else if firstName != "" {
+			fullName = firstName
+		}
+
+		p.logger.Debug("Constructed phone entry",
+			"index", i,
+			"phone", phone,
+			"lastName", lastName,
+			"firstName", firstName,
+			"fullName", fullName)
+
+		phoneInfo := PhoneInfo{
+			Phone: phone,
+			Name:  fullName,
+		}
+		phoneList = append(phoneList, phoneInfo)
+	}
+
+	p.logger.Info("Phone list extraction completed",
+		"totalEntries", len(phoneList),
+		"phoneList", phoneList)
+
+	return phoneList
+}
+
+// extractPhones extracts just the phone numbers from the phone list section
+func (p *EmailParserV2) extractPhones(body string) []string {
+	p.logger.Debug("Extracting phones from body")
+
 	// Look for phone list section
-	phoneListIndex := strings.Index(cleanBody, "Phone list:")
+	phoneListIndex := strings.Index(body, "Phone list:")
 	if phoneListIndex == -1 {
 		p.logger.Warn("Phone list section not found")
 		return nil
 	}
 
 	// Extract phone list section until next section or double newline
-	phoneSection := cleanBody[phoneListIndex:]
+	phoneSection := body[phoneListIndex:]
 
 	// Find the end of phone section
 	endMarkers := []string{"Schedule change :", "Old flight details", "New flight details", "=", "SegNo"}
@@ -84,99 +167,148 @@ func (p *EmailParserV2) ExtractPhoneList(body string) []PhoneInfo {
 	}
 
 	phoneSection = phoneSection[:minEndIndex]
-	p.logger.Debug("Phone section extracted", "section", phoneSection)
+	p.logger.Debug("Phone section extracted", "sectionLength", len(phoneSection))
 
-	// Updated regex to handle various formats
-	re := regexp.MustCompile(`/\s*(\d{10,14})\s*(?:/EN-|-)\d*([^/]+?)(?:\s*/|$)`)
+	// Extract phone numbers only
+	// Match pattern: / {phone} /EN-{number} {name}
+	re := regexp.MustCompile(`/\s*(\d{10,14})\s*(?:/EN-|-)\d*[^/\n]+`)
 	matches := re.FindAllStringSubmatch(phoneSection, -1)
 
-	var phoneList []PhoneInfo
-	seenPhones := make(map[string]bool)
-
+	var phones []string
 	for _, match := range matches {
-		if len(match) >= 3 {
+		if len(match) > 1 {
 			phone := strings.TrimSpace(match[1])
-			simpleFirstName := strings.TrimSpace(match[2])
 
 			// Convert phone number starting with 0 to 62
 			if strings.HasPrefix(phone, "0") {
 				phone = "62" + phone[1:]
 			}
 
-			// Skip if we've already seen this phone number
-			if seenPhones[phone] {
-				continue
-			}
-			seenPhones[phone] = true
-
-			// Find the complete name from passenger list
-			completeName := p.findCompleteNameForFirstName(simpleFirstName, passengerMap)
-
-			phoneInfo := PhoneInfo{
-				Phone: phone,
-				Name:  completeName, // Use complete name instead of just first name
-			}
-			phoneList = append(phoneList, phoneInfo)
+			phones = append(phones, phone)
 		}
 	}
 
-	p.logger.Info("Extracted phone list with complete names", "count", len(phoneList), "phones", phoneList)
-	return phoneList
+	p.logger.Debug("Phones extracted", "count", len(phones), "phones", phones)
+	return phones
 }
 
-// Helper method to build a map of first names to complete names
-func (p *EmailParserV2) buildPassengerMap(completePassengerList string) map[string]string {
-	passengerMap := make(map[string]string)
+// extractLastNames extracts last names from the email body
+func (p *EmailParserV2) extractLastNames(body string) []string {
+	p.logger.Debug("Extracting last names")
 
-	if completePassengerList == "" {
-		return passengerMap
-	}
+	// Look for the lastname section
+	re := regexp.MustCompile(`(?i)Last Name:\s*([^-\n]+?)(?:\s*-|First Name:|$)`)
+	match := re.FindStringSubmatch(body)
 
-	passengers := strings.Split(completePassengerList, ", ")
-
-	for _, passenger := range passengers {
-		passenger = strings.TrimSpace(passenger)
-		if passenger == "" {
-			continue
-		}
-
-		// Split by / to get LASTNAME/FIRSTNAME TITLE
-		parts := strings.Split(passenger, "/")
-		if len(parts) >= 2 {
-			// Extract the first name (without title)
-			firstNameWithTitle := strings.TrimSpace(parts[1])
-
-			// Remove title to get just the first name
-			firstNameParts := strings.Fields(firstNameWithTitle)
-			if len(firstNameParts) > 0 {
-				firstName := strings.ToUpper(firstNameParts[0])
-				// Map first name to complete passenger name
-				passengerMap[firstName] = passenger
+	if len(match) > 1 {
+		// Split by / and clean up
+		nameString := strings.TrimSpace(match[1])
+		names := strings.Split(nameString, "/")
+		var cleanNames []string
+		for _, name := range names {
+			name = strings.TrimSpace(name)
+			if name != "" && !strings.Contains(strings.ToLower(name), "first name") {
+				cleanNames = append(cleanNames, name)
 			}
 		}
+		p.logger.Debug("Last names extracted", "count", len(cleanNames), "names", cleanNames)
+		return cleanNames
 	}
 
-	return passengerMap
+	p.logger.Warn("No last names found")
+	return []string{}
 }
 
-// Helper method to find complete name for a given first name
-func (p *EmailParserV2) findCompleteNameForFirstName(simpleFirstName string, passengerMap map[string]string) string {
-	// Normalize the first name
-	normalized := strings.ToUpper(strings.TrimSpace(simpleFirstName))
+// extractFirstNames extracts first names with titles from the email body
+func (p *EmailParserV2) extractFirstNames(body string) []string {
+	p.logger.Debug("Extracting first names")
 
-	// Look for exact match
-	if completeName, found := passengerMap[normalized]; found {
-		return completeName
+	// Look for First Name section
+	re := regexp.MustCompile(`(?i)First Name:\s*([^-\n]+?)(?:\s*-|Phone list:|$)`)
+	match := re.FindStringSubmatch(body)
+
+	if len(match) > 1 {
+		// Split by / and clean up
+		nameString := strings.TrimSpace(match[1])
+		names := strings.Split(nameString, "/")
+		var cleanNames []string
+		for _, name := range names {
+			name = strings.TrimSpace(name)
+			if name != "" && !strings.Contains(strings.ToLower(name), "phone") {
+				cleanNames = append(cleanNames, name)
+			}
+		}
+		p.logger.Debug("First names extracted", "count", len(cleanNames), "names", cleanNames)
+		return cleanNames
 	}
 
-	// If no match found, return the original name
-	// This handles cases where the phone list name doesn't match passenger list
-	p.logger.Debug("No complete name found for", "firstName", simpleFirstName)
-	return simpleFirstName
+	p.logger.Warn("No first names found")
+	return []string{}
 }
 
-// FormatPhoneList can now remain the same since phoneInfo.Name already has complete names
+// ExtractCompletePassengerList extracts and formats passenger names as "LASTNAME/FIRSTNAME TITLE"
+func (p *EmailParserV2) ExtractCompletePassengerList(body string) string {
+	p.logger.Info("Starting ExtractCompletePassengerList")
+
+	cleanBody := p.cleanHTMLText(body)
+
+	// Extract last names and first names
+	lastNames := p.extractLastNames(cleanBody)
+	firstNames := p.extractFirstNames(cleanBody)
+
+	p.logger.Debug("Name components for passenger list",
+		"lastNamesCount", len(lastNames),
+		"firstNamesCount", len(firstNames))
+
+	// Combine into proper format using index matching
+	var formattedPassengers []string
+
+	maxLen := len(lastNames)
+	if len(firstNames) > maxLen {
+		maxLen = len(firstNames)
+	}
+
+	for i := 0; i < maxLen; i++ {
+		var formatted string
+
+		// Get last name
+		lastName := ""
+		if i < len(lastNames) {
+			lastName = strings.TrimSpace(lastNames[i])
+		}
+
+		// Get first name (includes title)
+		firstName := ""
+		if i < len(firstNames) {
+			firstName = strings.TrimSpace(firstNames[i])
+		}
+
+		// Format as "LASTNAME/FIRSTNAME TITLE"
+		if lastName != "" && firstName != "" {
+			formatted = fmt.Sprintf("%s/%s", lastName, firstName)
+		} else if lastName != "" {
+			formatted = lastName
+		} else if firstName != "" {
+			formatted = firstName
+		}
+
+		if formatted != "" {
+			formattedPassengers = append(formattedPassengers, formatted)
+		}
+	}
+
+	result := strings.Join(formattedPassengers, ", ")
+	p.logger.Info("Complete passenger list extracted",
+		"passengerCount", len(formattedPassengers),
+		"formatted", result)
+
+	return result
+}
+
+// FormatPhoneList formats phone list for display in messages
 func (p *EmailParserV2) FormatPhoneList(phoneList []PhoneInfo) string {
+	p.logger.Debug("Formatting phone list", "count", len(phoneList))
+
 	var builder strings.Builder
 
 	for _, phone := range phoneList {
@@ -184,7 +316,15 @@ func (p *EmailParserV2) FormatPhoneList(phoneList []PhoneInfo) string {
 		builder.WriteString(line)
 	}
 
-	return builder.String()
+	result := builder.String()
+	p.logger.Debug("Phone list formatted", "resultLength", len(result))
+
+	return result
+}
+
+// ExtractPassengerLastnameList - backward compatibility
+func (p *EmailParserV2) ExtractPassengerLastnameList(body string) string {
+	return p.ExtractCompletePassengerList(body)
 }
 
 // ExtractScheduleWithChanges extracts both old and new schedules and detects changes
@@ -642,137 +782,8 @@ func (p *EmailParserV2) ExtractAirlinesPnr(body string) AirlinesPnr {
 	return pnrList
 }
 
-// ExtractCompletePassengerList extracts and formats passenger names as "LASTNAME/FIRSTNAME TITLE"
-func (p *EmailParserV2) ExtractCompletePassengerList(body string) string {
-	cleanBody := p.cleanHTMLText(body)
-
-	// Extract last names
-	lastNames := p.extractLastNames(cleanBody)
-
-	// Extract first names
-	firstNames := p.extractFirstNames(cleanBody)
-
-	// Combine into proper format
-	var formattedPassengers []string
-
-	maxLen := len(lastNames)
-	if len(firstNames) > maxLen {
-		maxLen = len(firstNames)
-	}
-
-	for i := 0; i < maxLen; i++ {
-		var formatted string
-
-		// Get last name
-		lastName := ""
-		if i < len(lastNames) {
-			lastName = strings.TrimSpace(lastNames[i])
-		}
-
-		// Get first name
-		firstName := ""
-		if i < len(firstNames) {
-			firstName = strings.TrimSpace(firstNames[i])
-		}
-
-		// Format as "LASTNAME/FIRSTNAME" (title already included in firstname)
-		if lastName != "" && firstName != "" {
-			formatted = fmt.Sprintf("%s/%s", lastName, firstName)
-		} else if lastName != "" {
-			formatted = lastName
-		}
-
-		if formatted != "" {
-			formattedPassengers = append(formattedPassengers, formatted)
-		}
-	}
-
-	result := strings.Join(formattedPassengers, ", ")
-	p.logger.Info("Extracted complete passenger list", "formatted", result)
-	return result
-}
-
-// extractLastNames extracts last names from the email body
-func (p *EmailParserV2) extractLastNames(body string) []string {
-	// Look for the lastname section
-	re := regexp.MustCompile(`(?i)Last Name:\s*([^-\n]+?)(?:\s*-|First Name:|$)`)
-	match := re.FindStringSubmatch(body)
-
-	if len(match) > 1 {
-		// Split by / and clean up
-		nameString := strings.TrimSpace(match[1])
-		names := strings.Split(nameString, "/")
-		var cleanNames []string
-		for _, name := range names {
-			name = strings.TrimSpace(name)
-			if name != "" && !strings.Contains(strings.ToLower(name), "first name") {
-				cleanNames = append(cleanNames, name)
-			}
-		}
-		p.logger.Debug("Extracted last names", "names", cleanNames)
-		return cleanNames
-	}
-
-	p.logger.Debug("No last names found")
-	return []string{}
-}
-
-// extractFirstNames extracts first names from the email body
-func (p *EmailParserV2) extractFirstNames(body string) []string {
-	// Look for First Name section
-	re := regexp.MustCompile(`(?i)First Name:\s*([^-\n]+?)(?:\s*-|Phone list:|$)`)
-	match := re.FindStringSubmatch(body)
-
-	if len(match) > 1 {
-		// Split by / and clean up
-		nameString := strings.TrimSpace(match[1])
-		names := strings.Split(nameString, "/")
-		var cleanNames []string
-		for _, name := range names {
-			name = strings.TrimSpace(name)
-			if name != "" && !strings.Contains(strings.ToLower(name), "phone") {
-				cleanNames = append(cleanNames, name)
-			}
-		}
-		p.logger.Debug("Extracted first names", "names", cleanNames)
-		return cleanNames
-	}
-
-	p.logger.Debug("No first names found")
-	return []string{}
-}
-
-func (p *EmailParserV2) ExtractPassengerLastnameList(body string) string {
-	return p.ExtractCompletePassengerList(body)
-}
-
-// HasMatchingPassenger checks if any passenger from listDb exists in listParam
-// func (p *EmailParserV2) HasMatchingPassenger(listDb, listParam string) bool {
-// 	passengersA := strings.Split(listDb, ",")
-// 	passengersB := strings.Split(listParam, ",")
-
-// 	// Normalize and trim each entry
-// 	normalize := func(list []string) []string {
-// 		var result []string
-// 		for _, passenger := range list {
-// 			result = append(result, strings.TrimSpace(passenger))
-// 		}
-// 		return result
-// 	}
-
-// 	passengersA = normalize(passengersA)
-// 	passengersB = normalize(passengersB)
-
-// 	// Check if any passenger in A exists in B
-// 	for _, a := range passengersA {
-// 		for _, b := range passengersB {
-// 			if a == b {
-// 				p.logger.Info("Matching passenger found", "passenger", a)
-// 				return true
-// 			}
-// 		}
-// 	}
-
-// 	p.logger.Info("No matching passengers found")
-// 	return false
+// ParseInt converts string to int
+// func ParseInt(value string) int {
+// 	parsedValue, _ := strconv.Atoi(value)
+// 	return parsedValue
 // }

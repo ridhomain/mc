@@ -84,7 +84,7 @@ func (s *GmailServiceV2) FetchAndProcessEmails(ctx context.Context) error {
 	if lastEmail != nil {
 		fetchFrom = lastEmail.ReceivedAt
 	} else {
-		fetchFrom = time.Now().AddDate(0, -6, 0) // 6 months ago
+		fetchFrom = time.Now().AddDate(0, 0, -7) // 7 days ago
 	}
 
 	// Query Gmail

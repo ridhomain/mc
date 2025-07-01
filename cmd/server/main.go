@@ -12,6 +12,7 @@ import (
 	"mailcast-service-v2/internal/infrastructure/config"
 	"mailcast-service-v2/internal/infrastructure/oauth"
 	"mailcast-service-v2/internal/infrastructure/persistence"
+	"mailcast-service-v2/internal/infrastructure/router"
 	"mailcast-service-v2/internal/interface/gmail"
 	"mailcast-service-v2/internal/interface/repository"
 	"mailcast-service-v2/internal/usecase"
@@ -22,38 +23,44 @@ import (
 )
 
 func main() {
-	// Create logger
 	log := logger.NewLogger()
 	log.Info("Starting Mailcast Service")
 
-	// Load configuration
 	cfg, err := config.LoadConfig()
 	if err != nil {
 		log.Fatal("Failed to load config", "error", err)
 	}
 
-	// Set up context with cancellation
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Set up MongoDB connection
 	log.Info("Connecting to MongoDB")
 	mongoClient, db, err := persistence.NewMongoClient(ctx, cfg.MongoURI, cfg.MongoDB)
 	if err != nil {
 		log.Fatal("Failed to connect to MongoDB", "error", err)
 	}
 
-	// Set up repositories
+	// Repositories
 	emailRepo := repository.NewMongoEmailRepository(db)
 	whatsappRepo := repository.NewWhatsappRepository(log)
 	flightRecordRepo := repository.NewMongoFlightRecordRepository(db)
 	airlineRepository := repository.NewMongoAirlineRepository(db)
 	timezoneRepository := repository.NewMongoTimezoneRepository(db)
 
-	// Initialize email parser V2
+	// Parsers
+	emailParserV1 := utils.NewEmailParser(timezoneRepository, log)
 	emailParserV2 := utils.NewEmailParserV2(timezoneRepository, log)
 
-	// Initialize flight processor V2
+	// Processors
+	flightProcessorV1 := usecase.NewFlightProcessor(
+		airlineRepository,
+		timezoneRepository,
+		emailRepo,
+		whatsappRepo,
+		flightRecordRepo,
+		log,
+		emailParserV1,
+	)
 	flightProcessorV2 := usecase.NewFlightProcessorV2(
 		airlineRepository,
 		timezoneRepository,
@@ -64,6 +71,25 @@ func main() {
 		emailParserV2,
 	)
 
+	subjectRouter := router.NewSubjectRouter(log)
+
+	// Register FlightProcessor V1 for specific patterns
+	subjectRouter.Register(usecase.NewFlightHandlerV1Adapter(
+		flightProcessorV1,
+		"FlightProcessorV1",
+		[]string{"PREFLIGHT INFO GALILEO"},
+	))
+
+	// Register FlightProcessor V2 for different patterns
+	subjectRouter.Register(usecase.NewFlightHandlerV2Adapter(
+		flightProcessorV2,
+		"FlightProcessorV2",
+		[]string{"[PREFLIGHT GALILEO]"},
+	))
+
+	// Create email orchestrator
+	orchestrator := usecase.NewEmailOrchestrator(emailRepo, subjectRouter, log)
+
 	// Set up Gmail OAuth
 	gmailOAuth := oauth.NewGmailOAuth(
 		cfg.GmailClientID,
@@ -73,33 +99,32 @@ func main() {
 	)
 	tokenSource := gmailOAuth.GetTokenSource(ctx)
 
-	// Set up Gmail service
-	gmailService, err := gmail.NewGmailService(ctx, tokenSource, emailRepo, log, cfg.GmailPollInterval)
+	// Create Gmail service V2 with orchestrator
+	gmailService, err := gmail.NewGmailServiceV2(
+		ctx, tokenSource, emailRepo, orchestrator, log, cfg.GmailPollInterval,
+	)
 	if err != nil {
 		log.Fatal("Failed to create Gmail service", "error", err)
 	}
 
-	// Start Gmail polling in a goroutine
 	go gmailService.StartPolling(ctx)
 
-	// Start email processor in a goroutine
-	go func() {
-		processTicker := time.NewTicker(30 * time.Second)
-		defer processTicker.Stop()
+	// Periodic cleanup of stuck emails
+	// go func() {
+	// 	cleanupTicker := time.NewTicker(5 * time.Minute)
+	// 	defer cleanupTicker.Stop()
 
-		for {
-			select {
-			case <-ctx.Done():
-				log.Info("Email processor stopped")
-				return
-			case <-processTicker.C:
-				log.Info("Processing pending emails")
-				if err := flightProcessorV2.ProcessPendingEmails(ctx); err != nil {
-					log.Error("Error processing emails", "error", err)
-				}
-			}
-		}
-	}()
+	// 	for {
+	// 		select {
+	// 		case <-ctx.Done():
+	// 			return
+	// 		case <-cleanupTicker.C:
+	// 			if err := orchestrator.ProcessPendingEmails(ctx); err != nil {
+	// 				log.Error("Failed to process pending emails", "error", err)
+	// 			}
+	// 		}
+	// 	}
+	// }()
 
 	// Set up HTTP server for metrics
 	mux := http.NewServeMux()
@@ -116,7 +141,7 @@ func main() {
 		WriteTimeout: cfg.WriteTimeout,
 	}
 
-	// Start HTTP server in a goroutine
+	// Start HTTP server
 	go func() {
 		log.Info("Starting HTTP server", "port", cfg.Port)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -138,9 +163,8 @@ func main() {
 		log.Error("HTTP server shutdown error", "error", err)
 	}
 
-	cancel() // Cancel the context to stop all goroutines
+	cancel()
 
-	// Disconnect from MongoDB
 	if err := mongoClient.Disconnect(ctx); err != nil {
 		log.Error("MongoDB disconnect error", "error", err)
 	}
