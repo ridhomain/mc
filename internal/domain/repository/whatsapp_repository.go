@@ -9,5 +9,5 @@ import (
 // WhatsappRepository defines the interface for WhatsApp operations
 type WhatsappRepository interface {
 	SendPayload(ctx context.Context, payload *entity.Payload) (string, error)
-	RescheduleTask(ctx context.Context, taskID string, newScheduleTime time.Time, reason string) error
+	RescheduleTask(ctx context.Context, taskID string, newScheduleTime time.Time, reason, msg string) error
 }

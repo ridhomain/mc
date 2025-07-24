@@ -12,6 +12,7 @@ import (
 	"mailcast-service-v2/internal/domain/entity"
 	"mailcast-service-v2/internal/domain/repository"
 	"mailcast-service-v2/pkg/logger"
+	"mailcast-service-v2/pkg/utils"
 )
 
 // WhatsappRepository handles sending payloads to WhatsApp service
@@ -115,20 +116,23 @@ func (r *WhatsappRepository) SendPayload(ctx context.Context, payload *entity.Pa
 	}
 
 	var response struct {
-		ID       string                 `json:"_id"`
-		TaskID   string                 `json:"taskId"` // fallback
-		Status   string                 `json:"status"`
-		Metadata map[string]interface{} `json:"metadata"`
+		Success bool `json:"success"`
+		Data    struct {
+			TaskID     string `json:"taskId"`
+			Status     string `json:"status"`
+			ScheduleAt string `json:"scheduleAt"`
+		} `json:"data"`
+		Error struct {
+			Message string `json:"message"`
+			Code    string `json:"code"`
+		} `json:"error"`
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
 		return "", fmt.Errorf("failed to decode response: %w", err)
 	}
 
-	taskID := response.ID
-	if taskID == "" {
-		taskID = response.TaskID
-	}
+	taskID := response.Data.TaskID
 
 	r.logger.Info("Task created successfully",
 		"taskId", taskID,
@@ -140,10 +144,14 @@ func (r *WhatsappRepository) SendPayload(ctx context.Context, payload *entity.Pa
 }
 
 // RescheduleTask updates the schedule time of an existing task
-func (r *WhatsappRepository) RescheduleTask(ctx context.Context, taskID string, newScheduleTime time.Time, reason string) error {
+func (r *WhatsappRepository) RescheduleTask(ctx context.Context, taskID string, newScheduleTime time.Time, reason, msg string) error {
 	// Build request body for reschedule - matching the actual API
 	requestBody := map[string]interface{}{
 		"scheduleAt": newScheduleTime.Format(time.RFC3339),
+		"message": entity.Message{
+			Image:   WhatsAppImageMessage{URL: utils.IMAGE_CHANGE},
+			Caption: msg,
+		},
 	}
 
 	// Add reason if provided
@@ -178,14 +186,14 @@ func (r *WhatsappRepository) RescheduleTask(ctx context.Context, taskID string, 
 			ID          string    `json:"id"`
 			ScheduledAt time.Time `json:"scheduledAt"`
 			Status      string    `json:"status"`
-			Metadata    struct {
-				RescheduleHistory []struct {
-					From          time.Time `json:"from"`
-					To            time.Time `json:"to"`
-					Reason        string    `json:"reason"`
-					RescheduledAt time.Time `json:"rescheduledAt"`
-				} `json:"rescheduleHistory"`
-			} `json:"metadata"`
+			// Metadata    struct {
+			// 	RescheduleHistory []struct {
+			// 		From          time.Time `json:"from"`
+			// 		To            time.Time `json:"to"`
+			// 		Reason        string    `json:"reason"`
+			// 		RescheduledAt time.Time `json:"rescheduledAt"`
+			// 	} `json:"rescheduleHistory"`
+			// } `json:"metadata"`
 		} `json:"data"`
 		Error struct {
 			Message string `json:"message"`
@@ -204,8 +212,7 @@ func (r *WhatsappRepository) RescheduleTask(ctx context.Context, taskID string, 
 	r.logger.Info("Task rescheduled successfully",
 		"taskId", taskID,
 		"newScheduleTime", response.Data.ScheduledAt,
-		"reason", reason,
-		"rescheduleCount", len(response.Data.Metadata.RescheduleHistory))
+		"reason", reason)
 
 	return nil
 }

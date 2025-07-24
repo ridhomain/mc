@@ -462,6 +462,7 @@ func (fp *FlightProcessor) handleScheduleChange(
 			fmt.Sprintf("Flight schedule changed from %s to %s",
 				existingRecord.DepartureUTC.Format("15:04"),
 				schedule.DepartDateTime.Format("15:04")),
+			msg,
 		)
 
 		if err != nil {
